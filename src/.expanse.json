@@ -1,0 +1,162 @@
+{
+  "entrySpaceId": "terrain-ar-space-01",
+  "objects": {
+    "terrain-ar-camera-01": {
+      "camera": {
+        "allowedDevices": "any",
+        "type": "perspective",
+        "xr": {
+          "phone": "AR",
+          "xrCameraType": "world",
+          "desktop": "disabled",
+          "headset": "disabled"
+        }
+      },
+      "components": {
+        "terrain-tap-place-comp-01": {
+          "id": "terrain-tap-place-comp-01",
+          "name": "terrain-tap-place",
+          "parameters": {
+            "ground": {
+              "type": "entity",
+              "id": "terrain-ar-ground-01"
+            },
+            "terrainEntity": {
+              "type": "entity",
+              "id": "terrain-ar-model-01"
+            },
+            "yHeight": 0.005,
+            "finalScale": 1.0
+          }
+        }
+      },
+      "geometry": null,
+      "id": "terrain-ar-camera-01",
+      "material": null,
+      "name": "Camera",
+      "order": 1,
+      "parentId": "terrain-ar-space-01",
+      "position": [0, 2, 2],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1]
+    },
+
+    "terrain-ar-ambient-01": {
+      "components": {},
+      "geometry": null,
+      "id": "terrain-ar-ambient-01",
+      "light": {
+        "type": "ambient",
+        "intensity": 1.2
+      },
+      "material": null,
+      "name": "Ambient Light",
+      "order": 2,
+      "parentId": "terrain-ar-space-01",
+      "position": [0, 5, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1]
+    },
+
+    "terrain-ar-dirlight-01": {
+      "components": {},
+      "id": "terrain-ar-dirlight-01",
+      "light": {
+        "castShadow": true,
+        "color": "#ffffff",
+        "intensity": 1.0,
+        "type": "directional",
+        "shadowAutoUpdate": true,
+        "shadowBias": 0.001,
+        "shadowMapSize": [1024, 1024],
+        "shadowCameraLeft": -5,
+        "shadowCameraRight": 5,
+        "shadowCameraTop": 5,
+        "shadowCameraBottom": -5,
+        "shadowCameraNear": 0.5,
+        "shadowCameraFar": 50,
+        "targetX": 0,
+        "targetY": 0,
+        "targetZ": 0
+      },
+      "name": "Directional Light",
+      "order": 2.5,
+      "parentId": "terrain-ar-space-01",
+      "position": [10, 15, 8],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1]
+    },
+
+    "terrain-ar-ground-01": {
+      "components": {},
+      "geometry": {
+        "height": 1000,
+        "type": "plane",
+        "width": 1000
+      },
+      "id": "terrain-ar-ground-01",
+      "material": {
+        "color": "#000000",
+        "opacity": 0.0,
+        "side": "double",
+        "transparent": true,
+        "type": "shadow"
+      },
+      "name": "Ground",
+      "order": 3,
+      "parentId": "terrain-ar-space-01",
+      "position": [0, 0, 0],
+      "rotation": [-0.7071068, 0, 0, 0.7071068],
+      "scale": [1, 1, 1],
+      "shadow": {
+        "receiveShadow": true
+      }
+    },
+
+    "terrain-ar-model-01": {
+      "components": {},
+      "gltfModel": {
+        "animationClip": "",
+        "loop": false,
+        "src": {
+          "type": "asset",
+          "asset": "assets/terrain_optimized3.glb"
+        }
+      },
+      "hidden": true,
+      "id": "terrain-ar-model-01",
+      "name": "Terrain Model",
+      "order": 4,
+      "parentId": "terrain-ar-space-01",
+      "position": [0, 0, 0],
+      "rotation": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "shadow": {
+        "castShadow": true,
+        "receiveShadow": true
+      }
+    }
+  },
+
+  "runtimeVersion": {
+    "type": "version",
+    "level": "major",
+    "major": 2,
+    "minor": 0,
+    "patch": 0
+  },
+
+  "spaces": {
+    "terrain-ar-space-01": {
+      "activeCamera": "terrain-ar-camera-01",
+      "id": "terrain-ar-space-01",
+      "name": "Terrain AR",
+      "reflections": {
+        "type": "url",
+        "url": "https://cdn.8thwall.com/web/assets/envmap/basic_env_map-m9hqpneh.jpg"
+      }
+    }
+  },
+
+  "historyVersion": "terrain-ar-v1"
+}
