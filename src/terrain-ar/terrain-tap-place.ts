@@ -292,8 +292,7 @@ ecs.registerComponent({
 
       .onTrigger(doLanded, 'placed')
 
-    // ── STATE: placed ─────────────────────────────────────────────────────────
-
+    // ── STATE: placed ────────────────────────────────────────────────────────
     ecs.defineState('placed')
       .onEnter(() => {
         // Snap to exact final values in case of float imprecision
