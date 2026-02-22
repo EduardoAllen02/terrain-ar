@@ -215,9 +215,9 @@ ecs.registerComponent({
         // and where it needs to land (on the ground)
         const data = dataAttribute.cursor(eid)
         data.landX        = cd.cursorX
-        data.landY        = cd.cursorY          // ground-level Y
+        data.landY        = cd.cursorY + PREVIEW_HEIGHT  // keep at preview height
         data.landZ        = cd.cursorZ
-        data.landFromY    = cd.cursorY + PREVIEW_HEIGHT  // current float Y
+        data.landFromY    = cd.cursorY + PREVIEW_HEIGHT  // same — no drop
         data.landProgress = 0
 
         doPlace.trigger()
