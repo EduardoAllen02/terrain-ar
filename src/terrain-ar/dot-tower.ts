@@ -1,20 +1,19 @@
 /**
- * DotTower
- * Creates and animates a fine vertical column of dots in Three.js.
- * Dots flow upward in a slow helix pattern, giving a "holographic scan" feel.
+ * DotTower — v2
+ * A clean vertical dotted line in Three.js — like the BARCIS reference image.
+ * - Pure vertical, zero horizontal deviation
+ * - Soft round dots via radial-gradient canvas texture
+ * - White, evenly distributed, large, no trembling
  */
 export class DotTower {
   private points: any = null
-  private posArray!: Float32Array
-  private elapsed = 0
+  private static cachedTexture: any = null  // shared GPU texture across instances
 
-  private static readonly DOT_COUNT = 70
-  private static readonly TOWER_HEIGHT = 1.4  // metres — adjust to match preview height
-  private static readonly HELIX_RADIUS = 0.014
-  private static readonly HELIX_TURNS = 3
-  private static readonly FLOW_SPEED = 0.45   // upward flow speed (units/sec normalised)
-  private static readonly ROTATION_SPEED = 0.4 // helix spin speed (rad/sec)
-  private static readonly DOT_SIZE = 0.011
+  // ── Tuning ─────────────────────────────────────────────────────────────────
+  private static readonly DOT_COUNT    = 9      // fewer = bigger, more breathing room
+  private static readonly TOWER_HEIGHT = 1.35   // metres — must match PREVIEW_HEIGHT
+  private static readonly DOT_SIZE     = 0.055  // world-space diameter
+  private static readonly DOT_OPACITY  = 0.92
 
   constructor(
     private readonly scene: any,
@@ -22,61 +21,64 @@ export class DotTower {
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Public API
-  // ─────────────────────────────────────────────────────────────────────────
 
   create(): void {
     const {THREE} = this
     const count = DotTower.DOT_COUNT
 
-    this.posArray = new Float32Array(count * 3)
+    // Positions computed once — perfectly straight vertical line, no curves
+    const posArray = new Float32Array(count * 3)
+    for (let i = 0; i < count; i++) {
+      const t = i / (count - 1)                         // 0 at ground, 1 at top
+      posArray[i * 3]     = 0                            // X — dead center
+      posArray[i * 3 + 1] = t * DotTower.TOWER_HEIGHT   // Y — evenly spaced
+      posArray[i * 3 + 2] = 0                            // Z — dead center
+    }
 
     const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(this.posArray, 3))
+    geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3))
 
     const material = new THREE.PointsMaterial({
-      color: 0x4fc3f7,
-      size: DotTower.DOT_SIZE,
-      transparent: true,
-      opacity: 0.88,
-      depthWrite: false,
+      color:           0xffffff,
+      size:            DotTower.DOT_SIZE,
+      map:             this._getSoftCircleTexture(),
+      transparent:     true,
+      opacity:         DotTower.DOT_OPACITY,
+      depthWrite:      false,
       sizeAttenuation: true,
+      alphaTest:       0.01,
     })
 
     this.points = new THREE.Points(geometry, material)
-    this.elapsed = 0
-    this._writeDotPositions()
     this.scene.add(this.points)
   }
 
   /**
-   * Call every frame from onTick.
-   * @param x  World position X (cursor on ground)
-   * @param y  World position Y (ground level)
-   * @param z  World position Z (cursor on ground)
-   * @param dt Delta time in seconds
+   * Snap tower base to world position.
+   * Pass the already-smoothed cursor coords — no internal lerp here,
+   * that was causing the trembling.
    */
-  update(x: number, y: number, z: number, dt: number): void {
-    if (!this.points) return
-    this.elapsed += dt
-    this.points.position.set(x, y, z)
-    this._writeDotPositions()
+  update(x: number, y: number, z: number): void {
+    if (this.points) {
+      this.points.position.set(x, y, z)
+    }
   }
 
   setVisible(visible: boolean): void {
     if (this.points) this.points.visible = visible
   }
 
-  /** Fade out dots over `durationMs` then dispose. */
-  fadeAndDispose(durationMs = 400): void {
+  /** Fade opacity to 0 over `durationMs`, then remove from scene. */
+  fadeAndDispose(durationMs = 350): void {
     if (!this.points) return
-    const material = this.points.material
+    const mat   = this.points.material
     const start = performance.now()
+    const initialOpacity = DotTower.DOT_OPACITY
 
     const tick = () => {
-      const progress = Math.min((performance.now() - start) / durationMs, 1)
-      material.opacity = 0.88 * (1 - progress)
-      if (progress < 1) {
+      const p = Math.min((performance.now() - start) / durationMs, 1)
+      mat.opacity = initialOpacity * (1 - p)
+      if (p < 1) {
         requestAnimationFrame(tick)
       } else {
         this._dispose()
@@ -89,38 +91,34 @@ export class DotTower {
     this._dispose()
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Internal
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Private ───────────────────────────────────────────────────────────────
 
-  private _writeDotPositions(): void {
-    const count = DotTower.DOT_COUNT
-    const height = DotTower.TOWER_HEIGHT
-    const radius = DotTower.HELIX_RADIUS
-    const turns = DotTower.HELIX_TURNS
-    const flow = DotTower.FLOW_SPEED
-    const spin = DotTower.ROTATION_SPEED
+  /**
+   * 64×64 canvas texture: solid white center → transparent edge.
+   * Cached statically so all instances share one GPU upload.
+   */
+  private _getSoftCircleTexture(): any {
+    if (DotTower.cachedTexture) return DotTower.cachedTexture
 
-    for (let i = 0; i < count; i++) {
-      const t = i / count
-      // Flowing Y: each dot moves upward and wraps
-      const flowedT = (t + this.elapsed * flow) % 1.0
-      const yPos = flowedT * height
+    const size = 64
+    const half = size / 2
+    const canvas = document.createElement('canvas')
+    canvas.width  = size
+    canvas.height = size
 
-      // Helix angle: spiral based on position, plus time-based rotation
-      const angle = flowedT * Math.PI * 2 * turns + this.elapsed * spin
+    const ctx  = canvas.getContext('2d')!
+    const grad = ctx.createRadialGradient(half, half, 0, half, half, half)
+    grad.addColorStop(0,    'rgba(255,255,255,1.00)')
+    grad.addColorStop(0.40, 'rgba(255,255,255,0.95)')
+    grad.addColorStop(0.70, 'rgba(255,255,255,0.40)')
+    grad.addColorStop(1.00, 'rgba(255,255,255,0.00)')
 
-      // Vary radius slightly for organic feel
-      const r = radius * (1 + 0.35 * Math.sin(i * 1.7 + this.elapsed * 0.8))
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, size, size)
 
-      this.posArray[i * 3]     = Math.cos(angle) * r
-      this.posArray[i * 3 + 1] = yPos
-      this.posArray[i * 3 + 2] = Math.sin(angle) * r
-    }
-
-    if (this.points) {
-      this.points.geometry.attributes.position.needsUpdate = true
-    }
+    const {THREE} = this
+    DotTower.cachedTexture = new THREE.CanvasTexture(canvas)
+    return DotTower.cachedTexture
   }
 
   private _dispose(): void {
