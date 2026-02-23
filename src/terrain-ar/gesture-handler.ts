@@ -18,12 +18,14 @@
 
 const DEPTH_SENSITIVITY      = 0.005
 const HORIZONTAL_SENSITIVITY = 0.005
-const SCALE_MIN              = 0.02
-const SCALE_MAX              = 5.0
+const SCALE_MIN              = 1.0
+const SCALE_MAX              = 3.0
 // How many radians of model rotation per radian of finger-line rotation
-const ROTATION_SENSITIVITY   = 1.0
+const ROTATION_SENSITIVITY   = 0.8
 // Minimum spread (px) to avoid division instability
 const MIN_SPREAD             = 10
+// higher = more aggressive zoom at higher spreads
+const SCALE_SENSITIVITY = 0.5  // < 1.0 = más lento/suave, > 1.0 = más agresivo
 
 export class GestureHandler {
   private active = false
@@ -145,8 +147,9 @@ export class GestureHandler {
       // Ratio of current spread to spread at gesture start.
       // Multiply by the scale captured at gesture start for no drift.
       if (currentSpread > MIN_SPREAD && this.tf.initSpread > MIN_SPREAD) {
-        const ratio    = currentSpread / this.tf.initSpread
-        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * ratio))
+        const ratio = currentSpread / this.tf.initSpread
+        const sensitizedRatio = Math.pow(ratio, SCALE_SENSITIVITY)
+        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * sensitizedRatio))
         this._setScale(newScale)
       }
 

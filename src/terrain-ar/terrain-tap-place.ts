@@ -27,7 +27,7 @@ import {ArUiOverlay}    from './ar-ui-overlay'
 
 const CAMERA_OFFSET  = 0.6    // metres toward camera from raycast hit
 const INITIAL_SCALE  = 0.28   // starting scale (tweak until it looks right)
-const Y_ABOVE_GROUND = 0.01   // metres above detected floor
+const Y_ABOVE_GROUND = 1.0   // metres above detected floor
 
 // ════════════════════════════════════════════════════════════════════════════
 
