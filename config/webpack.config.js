@@ -6,7 +6,7 @@ const createVirtualEntryPlugin = require('./entry-plugin')
 
 const rootPath = process.cwd()
 const distPath = path.join(rootPath, 'dist')
-const srcPath = path.join(rootPath, 'src')
+const srcPath  = path.join(rootPath, 'src')
 
 const makeTsLoader = () => ({
   test: /\.ts$/,
@@ -38,17 +38,36 @@ const config = {
       patterns: [
         {
           from: path.join(rootPath, 'external'),
-          to: path.join(distPath, 'external'),
+          to:   path.join(distPath, 'external'),
           noErrorOnMissing: true,
+          globOptions: {
+            ignore: [
+              // ── Face tracking (not used — we use SLAM only) ────────────────
+              '**/xr/xr-face.js',
+              '**/xr/resources/face-ear-model.tflite',
+              '**/xr/resources/face-mesh-model.tflite',
+              '**/xr/resources/face-model.tflite',
+
+              // ── 8th Wall tablet UI (we use our own DOM UI) ─────────────────
+              '**/xr/resources/dom-tablet-button.glb',
+              '**/xr/resources/dom-tablet-frame.glb',
+
+              // ── Gaussian Splat renderer (not used) ────────────────────────
+              '**/runtime/resources/splat/**',
+
+              // ── Built-in 8th Wall fonts (we use system fonts in CSS) ───────
+              '**/runtime/resources/fonts/**',
+            ],
+          },
         },
         {
           from: path.join(srcPath, 'assets'),
-          to: path.join(distPath, 'assets'),
+          to:   path.join(distPath, 'assets'),
           noErrorOnMissing: true,
         },
         {
           from: path.join(rootPath, 'image-targets'),
-          to: path.join(distPath, 'image-targets'),
+          to:   path.join(distPath, 'image-targets'),
           noErrorOnMissing: true,
         },
       ],
@@ -57,7 +76,7 @@ const config = {
       srcDir: srcPath,
     }),
   ],
-  resolve: {extensions: ['.ts', '.js']},
+  resolve: { extensions: ['.ts', '.js'] },
   module: {
     rules: [
       makeTsLoader(),
@@ -75,14 +94,14 @@ const config = {
     hot: true,
     liveReload: false,
     headers: {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin':  '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
       'Access-Control-Allow-Headers': 'X-Requested-With, content-type, Authorization',
     },
     client: {
       overlay: {
         warnings: false,
-        errors: true,
+        errors:   true,
       },
     },
   },
