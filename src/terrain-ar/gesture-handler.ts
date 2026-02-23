@@ -40,7 +40,7 @@ export class GestureHandler {
   } | null = null
 
   constructor(
-    private readonly terrainEid: number,
+    private readonly terrainEid: any,
     private readonly world: any,
     private readonly THREE: any,
   ) {}
