@@ -1,23 +1,37 @@
 /**
- * terrain-tap-place — v5 final
+ * terrain-tap-place — v6 (Option C)
  *
- * ecs.eid is bigint — all 8th Wall / ECS APIs expect bigint directly.
- * No Number() casts. Raw schema.terrainEntity / schema.ground / eid used as-is.
+ * Auto-placement: model appears as soon as SLAM detects the first surface.
+ * No tap required, no dot tower, no floor shadow.
+ *
+ * ── Tuning constants (adjust these freely) ───────────────────────────────────
+ *
+ *  CAMERA_OFFSET   How many metres to shift the placement point TOWARD the
+ *                  camera from the actual raycast hit. Higher = model appears
+ *                  closer to you. (default 0.6)
+ *
+ *  INITIAL_SCALE   Uniform scale of the model when it first appears.
+ *                  1.0 = original GLB size. (default 0.28)
+ *
+ *  Y_ABOVE_GROUND  Extra height above the detected surface. 0 = sits on floor.
+ *                  Small positive value avoids z-fighting. (default 0.01)
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import * as ecs from '@8thwall/ecs'
-import {DotTower}        from './dot-tower'
-import {FloorShadow}     from './floor-shadow'
-import {GestureHandler}  from './gesture-handler'
-import {ArUiOverlay}     from './ar-ui-overlay'
+import {GestureHandler} from './gesture-handler'
+import {ArUiOverlay}    from './ar-ui-overlay'
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// ══ TUNING — change these to adjust model position and size ══════════════════
 
-const PREVIEW_HEIGHT    = 1.35
-const PREVIEW_SCALE     = 0.30
-const CURSOR_LERP       = 0.18
-const PREVIEW_ROT_SPEED = 0.007
-const HIDDEN_SCALE      = 0.00001  // near-zero scale hides model while keeping it in-world for asset loading
+const CAMERA_OFFSET  = 0.6    // metres toward camera from raycast hit
+const INITIAL_SCALE  = 0.28   // starting scale (tweak until it looks right)
+const Y_ABOVE_GROUND = 0.01   // metres above detected floor
+
+// ════════════════════════════════════════════════════════════════════════════
+
+const HIDDEN_SCALE   = 0.00001  // effectively invisible, keeps asset loading
 
 // ─── Material helpers ─────────────────────────────────────────────────────────
 
@@ -27,7 +41,7 @@ function captureAndGrey(THREE: any, obj: any, store: MeshEntry[]): void {
   store.length = 0
   const greyMat = new THREE.MeshStandardMaterial({
     color: 0x8eaec4, roughness: 0.75, metalness: 0.05,
-    transparent: true, opacity: 0.70,
+    transparent: true, opacity: 0.72,
   })
   obj.traverse((child: any) => {
     if (!child.isMesh) return
@@ -54,13 +68,31 @@ function isModelReady(world: any, terrainEid: any): boolean {
   let ready = false
   obj.traverse((child: any) => {
     if (ready) return
-    if (
-      child.isMesh &&
-      child.geometry?.attributes &&
-      Object.keys(child.geometry.attributes).length > 0
-    ) ready = true
+    if (child.isMesh && child.geometry?.attributes &&
+        Object.keys(child.geometry.attributes).length > 0) {
+      ready = true
+    }
   })
   return ready
+}
+
+/**
+ * Given a raycast hit point and the camera position, return a point shifted
+ * CAMERA_OFFSET metres toward the camera (XZ plane only, Y unchanged).
+ */
+function offsetTowardCamera(
+  THREE: any,
+  hitX: number, hitZ: number,
+  camX: number, camZ: number,
+  offset: number,
+): {x: number; z: number} {
+  const dir = new THREE.Vector3(camX - hitX, 0, camZ - hitZ)
+  if (dir.lengthSq() < 0.0001) return {x: hitX, z: hitZ}
+  dir.normalize()
+  return {
+    x: hitX + dir.x * offset,
+    z: hitZ + dir.z * offset,
+  }
 }
 
 // ─── ECS Component ───────────────────────────────────────────────────────────
@@ -71,16 +103,12 @@ ecs.registerComponent({
   schema: {
     ground:        ecs.eid,
     terrainEntity: ecs.eid,
-    yHeight:       ecs.f32,
   },
 
-  schemaDefaults: { yHeight: 0.005 },
+  schemaDefaults: {},
 
   data: {
-    cursorX:   ecs.f32,
-    cursorY:   ecs.f32,
-    cursorZ:   ecs.f32,
-    groundHit: ecs.boolean,
+    placed: ecs.boolean,
   },
 
   stateMachine: ({world, eid, schemaAttribute, dataAttribute}) => {
@@ -88,35 +116,22 @@ ecs.registerComponent({
     const {THREE} = window as any
 
     const matStore: MeshEntry[]            = []
-    let dotTower:    DotTower    | null    = null
-    let floorShadow: FloorShadow | null   = null
     let gestures:    GestureHandler | null = null
     let materialsApplied = false
 
-    const ui      = new ArUiOverlay()
-    const doReady = ecs.defineTrigger()
-    const doPlace = ecs.defineTrigger()
+    const ui       = new ArUiOverlay()
+    const doReady  = ecs.defineTrigger()
+    const doPlaced = ecs.defineTrigger()
 
-    // Three.js object accessor — uses Map with raw eid key
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
-
-    const ensureGrey = (): void => {
-      if (materialsApplied) return
-      const obj = getTerrainObj()
-      if (!obj) return
-      captureAndGrey(THREE, obj, matStore)
-      materialsApplied = true
-    }
 
     // ── STATE: loading ────────────────────────────────────────────────────────
 
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
-        // Keep at origin with near-zero scale — stays in-world so the engine
-        // streams and uploads the GLTF asset immediately.
-        // NEVER use ecs.Hidden or park at extreme Y: both block asset loading.
+        // Scale to near-zero at origin — stays in-world so engine streams asset
         world.setPosition(schema.terrainEntity, 0, 0, 0)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
@@ -132,105 +147,68 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ───────────────────────────────────────────────────────
+    // Raycast every tick. On FIRST hit: apply grey materials, position model,
+    // restore materials, activate gestures → placed.
 
     ecs.defineState('scanning')
       .onEnter(() => {
         ui.hideLoader()
-
-        // Hide by scale until first ground hit
         world.setPosition(schema.terrainEntity, 0, 0, 0)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
         })
         materialsApplied = false
-
-        dotTower    = new DotTower(world.three.scene, THREE)
-        floorShadow = new FloorShadow(world.three.scene, THREE)
-        dotTower.create()
-        floorShadow.create()
-
-        const cd     = dataAttribute.cursor(eid)
-        cd.groundHit = false
-        cd.cursorX   = 0
-        cd.cursorY   = 0
-        cd.cursorZ   = 0
-
-        ui.showStatus()
-        ui.setState('scanning')
+        dataAttribute.cursor(eid).placed = false
       })
 
       .onTick(() => {
         const hits       = world.raycastFrom(eid)
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
-        const hit        = groundHits.length > 0
-        const cd         = dataAttribute.cursor(eid)
-        cd.groundHit     = hit
+        if (groundHits.length === 0) return
 
-        if (hit) {
-          const {x, y, z} = groundHits[0].point
+        const hit = groundHits[0].point
 
-          cd.cursorX += (x - cd.cursorX) * CURSOR_LERP
-          cd.cursorY  = schema.yHeight
-          cd.cursorZ += (z - cd.cursorZ) * CURSOR_LERP
+        // Get camera world position for offset calculation
+        const camPos = ecs.Position.get(world, eid)
 
-          dotTower?.update(cd.cursorX, cd.cursorY, cd.cursorZ)
-          floorShadow?.update(cd.cursorX, cd.cursorZ)
+        const {x: px, z: pz} = offsetTowardCamera(
+          THREE,
+          hit.x, hit.z,
+          camPos.x, camPos.z,
+          CAMERA_OFFSET,
+        )
+        const py = hit.y + Y_ABOVE_GROUND
 
-          ensureGrey()
-
-          world.setPosition(
-            schema.terrainEntity,
-            cd.cursorX,
-            cd.cursorY + PREVIEW_HEIGHT,
-            cd.cursorZ,
-          )
-
-          ecs.Scale.set(world, schema.terrainEntity, {
-            x: PREVIEW_SCALE, y: PREVIEW_SCALE, z: PREVIEW_SCALE,
-          })
-
+        // Apply grey preview materials once
+        if (!materialsApplied) {
           const obj = getTerrainObj()
-          if (obj) obj.rotation.y += PREVIEW_ROT_SPEED
-
-          ui.setState('ground-found')
-        } else {
-          dotTower?.update(cd.cursorX, cd.cursorY, cd.cursorZ)
-          floorShadow?.update(cd.cursorX, cd.cursorZ)
-
-          // Hide model by scale when no ground detected
-          ecs.Scale.set(world, schema.terrainEntity, {
-            x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
-          })
-          ui.setState('scanning')
+          if (obj) {
+            captureAndGrey(THREE, obj, matStore)
+            materialsApplied = true
+          }
         }
+
+        // Position and scale model
+        world.setPosition(schema.terrainEntity, px, py, pz)
+        ecs.Scale.set(world, schema.terrainEntity, {
+          x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
+        })
+
+        // Auto-place immediately on first surface detection
+        doPlaced.trigger()
       })
 
-      .listen(world.events.globalId, ecs.input.SCREEN_TOUCH_START, () => {
-        if (!dataAttribute.get(eid).groundHit) return
-        doPlace.trigger()
-      })
-
-      .onTrigger(doPlace, 'placed')
+      .onTrigger(doPlaced, 'placed')
 
     // ── STATE: placed ─────────────────────────────────────────────────────────
 
     ecs.defineState('placed')
       .onEnter(() => {
-        const obj = getTerrainObj()
-        if (obj) obj.rotation.y = 0
-
+        // Restore original textures
         restoreMaterials(matStore)
         materialsApplied = false
 
-        dotTower?.fadeAndDispose(300)
-        dotTower = null
-        floorShadow?.fadeAndDispose(300)
-        floorShadow = null
-
-        ui.setState('placed')
-        ui.hide(900)
-
-        // Pass raw eid — GestureHandler uses it only with Three.js Map (any key)
+        // Activate gesture controls
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
       })
