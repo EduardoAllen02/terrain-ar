@@ -17,7 +17,7 @@ const PREVIEW_HEIGHT    = 1.35
 const PREVIEW_SCALE     = 0.30
 const CURSOR_LERP       = 0.18
 const PREVIEW_ROT_SPEED = 0.007
-const PARK_Y            = -9999
+const HIDDEN_SCALE      = 0.00001  // near-zero scale hides model while keeping it in-world for asset loading
 
 // ─── Material helpers ─────────────────────────────────────────────────────────
 
@@ -114,14 +114,16 @@ ecs.registerComponent({
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
-        // Do NOT use Hidden — it blocks GLTF asset loading in 8th Wall.
-        // Park the model below the world instead.
-        world.setPosition(schema.terrainEntity, 0, PARK_Y, 0)
-
+        // Keep at origin with near-zero scale — stays in-world so the engine
+        // streams and uploads the GLTF asset immediately.
+        // NEVER use ecs.Hidden or park at extreme Y: both block asset loading.
+        world.setPosition(schema.terrainEntity, 0, 0, 0)
+        ecs.Scale.set(world, schema.terrainEntity, {
+          x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
+        })
         if (ecs.Hidden.has(world, schema.terrainEntity)) {
           ecs.Hidden.remove(world, schema.terrainEntity)
         }
-
         ui.showLoader()
       })
       .onTick(() => {
@@ -135,7 +137,11 @@ ecs.registerComponent({
       .onEnter(() => {
         ui.hideLoader()
 
-        world.setPosition(schema.terrainEntity, 0, PARK_Y, 0)
+        // Hide by scale until first ground hit
+        world.setPosition(schema.terrainEntity, 0, 0, 0)
+        ecs.Scale.set(world, schema.terrainEntity, {
+          x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
+        })
         materialsApplied = false
 
         dotTower    = new DotTower(world.three.scene, THREE)
@@ -155,7 +161,6 @@ ecs.registerComponent({
 
       .onTick(() => {
         const hits       = world.raycastFrom(eid)
-        // eid comparison: both are the same bigint type from the ECS
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         const hit        = groundHits.length > 0
         const cd         = dataAttribute.cursor(eid)
@@ -191,7 +196,11 @@ ecs.registerComponent({
         } else {
           dotTower?.update(cd.cursorX, cd.cursorY, cd.cursorZ)
           floorShadow?.update(cd.cursorX, cd.cursorZ)
-          world.setPosition(schema.terrainEntity, 0, PARK_Y, 0)
+
+          // Hide model by scale when no ground detected
+          ecs.Scale.set(world, schema.terrainEntity, {
+            x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
+          })
           ui.setState('scanning')
         }
       })
