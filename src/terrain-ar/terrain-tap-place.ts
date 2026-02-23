@@ -1,27 +1,31 @@
 /**
- * terrain-tap-place — v3
+ * terrain-tap-place — v4
  *
- * Placement philosophy:
- * ──────────────────────
- * The preview model IS the final model. On tap, nothing moves, nothing scales.
- * We only do two things:
- *   1. Restore original materials (grey → textured)
- *   2. Fade and dispose the dot tower
+ * What's new vs v3:
+ * ──────────────────
+ * 1. Loading detection: polls until the GLTF mesh is ready, shows spinner.
+ * 2. Floor shadow: soft circular halo under the dot tower.
+ * 3. Post-placement gesture controls via GestureHandler.
  *
- * This guarantees the model stays pixel-perfect where the user saw it.
- * Scale adjustments post-placement should be done via pinch gesture.
+ * States
+ * ───────
+ *  loading   → model not yet in Three.js scene, show spinner
+ *  scanning  → raycast + dot tower + floor shadow + grey preview
+ *  placed    → terminal; GestureHandler active
  */
 
 import * as ecs from '@8thwall/ecs'
-import {DotTower} from './dot-tower'
-import {ArUiOverlay} from './ar-ui-overlay'
+import {DotTower}      from './dot-tower'
+import {FloorShadow}   from './floor-shadow'
+import {GestureHandler} from './gesture-handler'
+import {ArUiOverlay}   from './ar-ui-overlay'
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PREVIEW_HEIGHT    = 1.35   // metres the model floats above cursor
-const PREVIEW_SCALE     = 0.30   // scale during preview (and after placement)
-const CURSOR_LERP       = 0.18   // cursor follow smoothing
-const PREVIEW_ROT_SPEED = 0.007  // rad/frame slow spin during preview
+const PREVIEW_HEIGHT    = 1.35
+const PREVIEW_SCALE     = 0.30
+const CURSOR_LERP       = 0.18
+const PREVIEW_ROT_SPEED = 0.007
 
 // ─── Material helpers ─────────────────────────────────────────────────────────
 
@@ -30,11 +34,8 @@ type MeshEntry = { mesh: any; original: any }
 function captureAndGrey(THREE: any, obj: any, store: MeshEntry[]): void {
   store.length = 0
   const greyMat = new THREE.MeshStandardMaterial({
-    color:       0x8eaec4,
-    roughness:   0.75,
-    metalness:   0.05,
-    transparent: true,
-    opacity:     0.70,
+    color: 0x8eaec4, roughness: 0.75, metalness: 0.05,
+    transparent: true, opacity: 0.70,
   })
   obj.traverse((child: any) => {
     if (!child.isMesh) return
@@ -55,6 +56,15 @@ function restoreMaterials(store: MeshEntry[]): void {
   store.length = 0
 }
 
+/** Returns true once the GLTF has at least one mesh loaded into Three.js. */
+function isModelReady(world: any, eid: number): boolean {
+  const obj = world.three.entityToObject.get(eid)
+  if (!obj) return false
+  let hasMesh = false
+  obj.traverse((c: any) => { if (c.isMesh) hasMesh = true })
+  return hasMesh
+}
+
 // ─── ECS Component ───────────────────────────────────────────────────────────
 
 ecs.registerComponent({
@@ -63,12 +73,10 @@ ecs.registerComponent({
   schema: {
     ground:        ecs.eid,
     terrainEntity: ecs.eid,
-    yHeight:       ecs.f32,   // small offset so cursor sits on surface
+    yHeight:       ecs.f32,
   },
 
-  schemaDefaults: {
-    yHeight: 0.005,
-  },
+  schemaDefaults: { yHeight: 0.005 },
 
   data: {
     cursorX:     ecs.f32,
@@ -80,59 +88,85 @@ ecs.registerComponent({
 
   stateMachine: ({world, eid, schemaAttribute, dataAttribute}) => {
     const schema = schemaAttribute.get(eid)
+    const {THREE} = window as any
 
-    const matStore: MeshEntry[] = []
-    let dotTower: DotTower | null = null
+    // Runtime helpers (closure — not ECS data)
+    const matStore: MeshEntry[]    = []
+    let dotTower: DotTower | null  = null
+    let floorShadow: FloorShadow | null = null
+    let gestures: GestureHandler | null = null
+    let materialsApplied           = false
     const ui = new ArUiOverlay()
-    let materialsApplied = false
 
-    const doPlace = ecs.defineTrigger()
+    const doReady  = ecs.defineTrigger()
+    const doPlace  = ecs.defineTrigger()
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     const getTerrainObj = () =>
       world.three.entityToObject.get(schema.terrainEntity) ?? null
 
-    const keepLastElapsed = () => {
+    const keepTime = () => {
       dataAttribute.cursor(eid).lastElapsed = world.time.elapsed
     }
 
-    const ensureGreyMaterials = () => {
+    const ensureGrey = () => {
       if (materialsApplied) return
       const obj = getTerrainObj()
       if (!obj) return
-      captureAndGrey((window as any).THREE, obj, matStore)
+      captureAndGrey(THREE, obj, matStore)
       materialsApplied = true
     }
+
+    // ── STATE: loading ────────────────────────────────────────────────────────
+
+    ecs.defineState('loading')
+      .initial()
+      .onEnter(() => {
+        // Keep terrain hidden while loading
+        ecs.Hidden.set(world, schema.terrainEntity)
+        // Show spinner
+        ui.showLoader()
+      })
+      .onTick(() => {
+        // Poll until Three.js has the model
+        if (isModelReady(world, Number(schema.terrainEntity))) {
+          doReady.trigger()
+        }
+      })
+      .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ───────────────────────────────────────────────────────
 
     ecs.defineState('scanning')
-      .initial()
       .onEnter(() => {
-        const {THREE} = window as any
-        dotTower = new DotTower(world.three.scene, THREE)
+        // Hide loader, show status pill
+        ui.hideLoader()
+
+        // Create Three.js helpers
+        dotTower    = new DotTower(world.three.scene, THREE)
+        floorShadow = new FloorShadow(world.three.scene, THREE)
         dotTower.create()
+        floorShadow.create()
 
         ecs.Hidden.set(world, schema.terrainEntity)
         materialsApplied = false
 
-        keepLastElapsed()
+        keepTime()
         dataAttribute.cursor(eid).groundHit = false
 
-        ui.show()
+        ui.showStatus()
         ui.setState('scanning')
       })
 
       .onTick(() => {
-        keepLastElapsed()
+        keepTime()
 
         const hits       = world.raycastFrom(eid)
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         const hit        = groundHits.length > 0
         const cd         = dataAttribute.cursor(eid)
-
-        cd.groundHit = hit
+        cd.groundHit     = hit
 
         if (hit) {
           const {x, y, z} = groundHits[0].point
@@ -142,16 +176,18 @@ ecs.registerComponent({
           cd.cursorY  = schema.yHeight
           cd.cursorZ += (z - cd.cursorZ) * CURSOR_LERP
 
-          // Tower follows smoothed position — no internal lerp, no trembling
+          // Update Three.js helpers
           dotTower?.update(cd.cursorX, cd.cursorY, cd.cursorZ)
+          floorShadow?.update(cd.cursorX, cd.cursorZ)
 
-          ensureGreyMaterials()
+          // Lazy-apply grey materials
+          ensureGrey()
 
           if (ecs.Hidden.has(world, schema.terrainEntity)) {
             ecs.Hidden.remove(world, schema.terrainEntity)
           }
 
-          // Position model floating above tower
+          // Float model above tower
           world.setPosition(
             schema.terrainEntity,
             cd.cursorX,
@@ -159,20 +195,19 @@ ecs.registerComponent({
             cd.cursorZ,
           )
 
-          // Lock preview scale every tick to prevent drift
           ecs.Scale.set(world, schema.terrainEntity, {
-            x: PREVIEW_SCALE,
-            y: PREVIEW_SCALE,
-            z: PREVIEW_SCALE,
+            x: PREVIEW_SCALE, y: PREVIEW_SCALE, z: PREVIEW_SCALE,
           })
 
-          // Slow spin
           const obj = getTerrainObj()
           if (obj) obj.rotation.y += PREVIEW_ROT_SPEED
 
           ui.setState('ground-found')
         } else {
+          // No ground — update helpers at last known position
           dotTower?.update(cd.cursorX, cd.cursorY, cd.cursorZ)
+          floorShadow?.update(cd.cursorX, cd.cursorZ)
+
           if (!ecs.Hidden.has(world, schema.terrainEntity)) {
             ecs.Hidden.set(world, schema.terrainEntity)
           }
@@ -181,43 +216,47 @@ ecs.registerComponent({
       })
 
       .listen(world.events.globalId, ecs.input.SCREEN_TOUCH_START, () => {
-        const cd = dataAttribute.get(eid)
-        if (!cd.groundHit) return
+        if (!dataAttribute.get(eid).groundHit) return
         doPlace.trigger()
       })
 
       .onTrigger(doPlace, 'placed')
 
     // ── STATE: placed ─────────────────────────────────────────────────────────
-    //
-    // Model is already exactly where it should be — position and scale set
-    // last tick in scanning. We only swap materials and remove the dots.
 
     ecs.defineState('placed')
       .onEnter(() => {
-        // Stop rotation — freeze current angle
+        // Stop preview rotation
         const obj = getTerrainObj()
         if (obj) obj.rotation.y = 0
 
-        // Swap grey → original materials
+        // Restore original textures
         restoreMaterials(matStore)
         materialsApplied = false
 
-        // Fade out dot tower
-        if (dotTower) {
-          dotTower.fadeAndDispose(300)
-          dotTower = null
-        }
+        // Fade out Three.js helpers
+        dotTower?.fadeAndDispose(300)
+        dotTower = null
+        floorShadow?.fadeAndDispose(300)
+        floorShadow = null
 
-        // Update and dismiss UI
+        // Update & dismiss UI
         ui.setState('placed')
         ui.hide(900)
 
-        // Terminal state — model stays exactly where it was in last scanning tick
+        // Activate post-placement gesture controls
+        gestures = new GestureHandler(Number(schema.terrainEntity), world, THREE)
+        gestures.attach()
+      })
+
+      .onExit(() => {
+        // Clean up gestures if state ever exits
+        gestures?.detach()
+        gestures = null
       })
   },
 
   remove: (_world, _component) => {
-    // No ECS cleanup needed; Three.js objects live in closure
+    // Gestures live in closure — GC handles it
   },
 })
