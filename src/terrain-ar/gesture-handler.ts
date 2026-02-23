@@ -247,13 +247,27 @@ export class GestureHandler {
   // ── ECS / Three.js accessors ──────────────────────────────────────────────
 
   private _getScale(): number {
+    // Read from ECS — source of truth for scale
+    const ecs = (window as any).ecs
+    if (ecs?.Scale?.has(this.world, this.terrainEid)) {
+      return ecs.Scale.get(this.world, this.terrainEid).x
+    }
+    // Fallback to Three.js
     const obj = this.world.three.entityToObject.get(this.terrainEid)
     return obj?.scale.x ?? 1
   }
 
   private _setScale(s: number): void {
-    const obj = this.world.three.entityToObject.get(this.terrainEid)
-    if (obj) obj.scale.set(s, s, s)
+    // Must go through ECS — setting Three.js obj.scale directly gets
+    // overwritten every frame by the ECS Scale component.
+    const ecs = (window as any).ecs
+    if (ecs?.Scale) {
+      ecs.Scale.set(this.world, this.terrainEid, {x: s, y: s, z: s})
+    } else {
+      // Fallback: direct Three.js (only if ECS not ready)
+      const obj = this.world.three.entityToObject.get(this.terrainEid)
+      if (obj) obj.scale.set(s, s, s)
+    }
   }
 
   private _getCamera(): any {
