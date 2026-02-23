@@ -147,6 +147,8 @@ export class ArUiOverlay {
   private status: HTMLElement | null = null
   private statusDot: HTMLElement | null = null
   private statusText: HTMLElement | null = null
+  private _phaseTimer1: number = 0
+  private _phaseTimer2: number = 0
 
   // ── Loader ──────────────────────────────────────────────────────────────────
 
@@ -161,12 +163,30 @@ export class ArUiOverlay {
         <div class="ar-loader-ring"></div>
         <div class="ar-loader-ball"></div>
       </div>
-      <span class="ar-loader-label">Cargando</span>
+      <span class="ar-loader-label" id="ar-loader-text">Iniciando cámara</span>
     `
     document.body.appendChild(this.loader)
+
+    // Phase messages timed to match XR boot reality:
+    // 0s    → "Iniciando cámara"      (XR runtime + permissions)
+    // 4s    → "Detectando entorno"    (SLAM calibration)
+    // 8s    → "Preparando experiencia" (almost ready)
+    this._phaseTimer1 = window.setTimeout(() => {
+      const el = document.getElementById('ar-loader-text')
+      if (el) el.textContent = 'Detectando entorno'
+    }, 4000)
+
+    this._phaseTimer2 = window.setTimeout(() => {
+      const el = document.getElementById('ar-loader-text')
+      if (el) el.textContent = 'Preparando experiencia'
+    }, 8000)
   }
 
   hideLoader(): void {
+    // Clear phase message timers
+    if (this._phaseTimer1) { window.clearTimeout(this._phaseTimer1); this._phaseTimer1 = 0 }
+    if (this._phaseTimer2) { window.clearTimeout(this._phaseTimer2); this._phaseTimer2 = 0 }
+
     if (!this.loader) return
     const el = this.loader
     this.loader = null
