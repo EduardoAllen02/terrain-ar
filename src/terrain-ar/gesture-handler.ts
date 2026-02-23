@@ -18,7 +18,7 @@
 
 const DEPTH_SENSITIVITY      = 0.005
 const HORIZONTAL_SENSITIVITY = 0.005
-const SCALE_MIN              = 1.0
+const SCALE_MIN              = 0.05
 const SCALE_MAX              = 3.0
 // How many radians of model rotation per radian of finger-line rotation
 const ROTATION_SENSITIVITY   = 0.8
