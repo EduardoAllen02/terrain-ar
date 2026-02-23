@@ -18,21 +18,25 @@
 
 const DEPTH_SENSITIVITY      = 0.005
 const HORIZONTAL_SENSITIVITY = 0.005
-const SCALE_MIN              = 0.05
-const SCALE_MAX              = 3.0
-// How many radians of model rotation per radian of finger-line rotation
-const ROTATION_SENSITIVITY   = 0.8
-// Minimum spread (px) to avoid division instability
+const SCALE_MIN              = 0.02
+const SCALE_MAX              = 5.0
 const MIN_SPREAD             = 10
-// higher = more aggressive zoom at higher spreads
-const SCALE_SENSITIVITY = 0.5  // < 1.0 = más lento/suave, > 1.0 = más agresivo
+// Single-finger rotation sensitivity (radians per pixel of horizontal drag)
+const ROTATE_SF_SENSITIVITY  = 0.008
 
 export class GestureHandler {
   private active = false
   private listeners: Array<[EventTarget, string, EventListener]> = []
 
   // ── Single-finger state ───────────────────────────────────────────────────
-  private sf: {id: number; lastX: number; lastY: number} | null = null
+  // mode 'pan'    → finger landed ON the model  → move near/far + left/right
+  // mode 'rotate' → finger landed OFF the model → rotate model left/right
+  private sf: {
+    id:    number
+    lastX: number
+    lastY: number
+    mode:  'pan' | 'rotate'
+  } | null = null
 
   // ── Two-finger state ──────────────────────────────────────────────────────
   private tf: {
@@ -106,8 +110,14 @@ export class GestureHandler {
     }
 
     if (touches.length === 1 && !this.tf) {
-      const t = touches[0]
-      this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY}
+      const t    = touches[0]
+      const hits = this._hitTestModel(t.clientX, t.clientY)
+      this.sf = {
+        id:    t.identifier,
+        lastX: t.clientX,
+        lastY: t.clientY,
+        mode:  hits ? 'pan' : 'rotate',
+      }
     }
   }
 
@@ -126,30 +136,10 @@ export class GestureHandler {
       const currentAngle  = this._angle(a, b)
       const currentSpread = this._spread(a, b)
 
-      // ── ROTATION ──────────────────────────────────────────────────────
-      // The angle of the line connecting finger A to finger B.
-      // When that line rotates, we rotate the model by the same delta.
-      // Wraps correctly through ±π using atan2 delta.
-      const angleDelta = this._angleDelta(this.tf.prevAngle, currentAngle)
-
-      if (Math.abs(angleDelta) > 0.0008) {
-        const rot = angleDelta * ROTATION_SENSITIVITY
-        const half = rot * 0.5
-        this.world.transform.rotateSelf(this.terrainEid, {
-          x: 0,
-          y: Math.sin(half),
-          z: 0,
-          w: Math.cos(half),
-        })
-      }
-
-      // ── SCALE ─────────────────────────────────────────────────────────
-      // Ratio of current spread to spread at gesture start.
-      // Multiply by the scale captured at gesture start for no drift.
+      // ── SCALE only ────────────────────────────────────────────────────
       if (currentSpread > MIN_SPREAD && this.tf.initSpread > MIN_SPREAD) {
-        const ratio = currentSpread / this.tf.initSpread
-        const sensitizedRatio = Math.pow(ratio, SCALE_SENSITIVITY)
-        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * sensitizedRatio))
+        const ratio    = currentSpread / this.tf.initSpread
+        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * ratio))
         this._setScale(newScale)
       }
 
@@ -171,30 +161,46 @@ export class GestureHandler {
 
       if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) return
 
-      const cam = this._getCamera()
-      if (!cam) return
+      // ── PAN mode: finger on model → move near/far + left/right ───────────
+      if (this.sf.mode === 'pan') {
+        const cam = this._getCamera()
+        if (!cam) return
 
-      const {THREE} = this
+        const {THREE} = this
 
-      const forward = new THREE.Vector3(0, 0, -1)
-        .applyQuaternion(cam.quaternion)
-        .setY(0)
-        .normalize()
+        const forward = new THREE.Vector3(0, 0, -1)
+          .applyQuaternion(cam.quaternion)
+          .setY(0)
+          .normalize()
 
-      const right = new THREE.Vector3(1, 0, 0)
-        .applyQuaternion(cam.quaternion)
-        .setY(0)
-        .normalize()
+        const right = new THREE.Vector3(1, 0, 0)
+          .applyQuaternion(cam.quaternion)
+          .setY(0)
+          .normalize()
 
-      const depthDelta = -dy * DEPTH_SENSITIVITY
-      const horizDelta =  dx * HORIZONTAL_SENSITIVITY
+        const depthDelta = -dy * DEPTH_SENSITIVITY
+        const horizDelta =  dx * HORIZONTAL_SENSITIVITY
 
-      const pos = this.world.transform.getWorldPosition(this.terrainEid)
-      this.world.transform.setWorldPosition(this.terrainEid, {
-        x: pos.x + forward.x * depthDelta + right.x * horizDelta,
-        y: pos.y,
-        z: pos.z + forward.z * depthDelta + right.z * horizDelta,
-      })
+        const pos = this.world.transform.getWorldPosition(this.terrainEid)
+        this.world.transform.setWorldPosition(this.terrainEid, {
+          x: pos.x + forward.x * depthDelta + right.x * horizDelta,
+          y: pos.y,
+          z: pos.z + forward.z * depthDelta + right.z * horizDelta,
+        })
+        return
+      }
+
+      // ── ROTATE mode: finger off model → rotate model on Y axis ───────────
+      if (this.sf.mode === 'rotate' && Math.abs(dx) > 0.3) {
+        const rot  = dx * ROTATE_SF_SENSITIVITY
+        const half = rot * 0.5
+        this.world.transform.rotateSelf(this.terrainEid, {
+          x: 0,
+          y: Math.sin(half),
+          z: 0,
+          w: Math.cos(half),
+        })
+      }
     }
   }
 
@@ -209,7 +215,8 @@ export class GestureHandler {
     } else if (remaining.length === 1) {
       this.tf = null
       const t = remaining[0]
-      this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY}
+      const hits = this._hitTestModel(t.clientX, t.clientY)
+      this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY, mode: hits ? 'pan' : 'rotate'}
     }
   }
 
@@ -271,6 +278,35 @@ export class GestureHandler {
       const obj = this.world.three.entityToObject.get(this.terrainEid)
       if (obj) obj.scale.set(s, s, s)
     }
+  }
+
+  /**
+   * Cast a ray from screen position (clientX, clientY) into the scene.
+   * Returns true if it intersects any mesh of the terrain model.
+   * Uses Three.js Raycaster with NDC coordinates.
+   */
+  private _hitTestModel(clientX: number, clientY: number): boolean {
+    const cam = this._getCamera()
+    if (!cam) return false
+
+    const obj = this.world.three.entityToObject.get(this.terrainEid)
+    if (!obj) return false
+
+    const {THREE} = this
+
+    // Convert screen coords to Normalised Device Coordinates [-1, 1]
+    const ndcX =  (clientX / window.innerWidth)  * 2 - 1
+    const ndcY = -(clientY / window.innerHeight) * 2 + 1
+
+    const raycaster = new THREE.Raycaster()
+    raycaster.setFromCamera({x: ndcX, y: ndcY}, cam)
+
+    // Collect all meshes in the terrain object
+    const meshes: any[] = []
+    obj.traverse((child: any) => { if (child.isMesh) meshes.push(child) })
+
+    const intersects = raycaster.intersectObjects(meshes, false)
+    return intersects.length > 0
   }
 
   private _getCamera(): any {
