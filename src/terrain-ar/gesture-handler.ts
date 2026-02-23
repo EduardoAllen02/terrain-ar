@@ -1,64 +1,46 @@
 /**
- * GestureHandler — v3
+ * GestureHandler — v4
+ *
+ * Two-finger gestures (simultaneous, independent metrics):
+ *
+ *   ROTATION — driven by the change in ANGLE of the line connecting the two fingers
+ *     Upper-left  + Lower-right moving apart  → counter-clockwise
+ *     Upper-right + Lower-left  moving apart  → clockwise
+ *
+ *   SCALE — driven by the change in DISTANCE (spread) between the two fingers
+ *     Fingers spreading apart  → model gets bigger
+ *     Fingers pinching together → model gets smaller
  *
  * Single finger:
- *   ↑↓  → depth (forward/back along camera forward vector)
- *   ←→  → horizontal pan (left/right along camera right vector)
- *
- * Two fingers — mutually exclusive, determined by dominant axis:
- *   Dominant horizontal (dx >> dy) → ROTATION around model Y axis
- *   Dominant vertical   (dy >> dx) → SCALE (fingers apart = bigger, together = smaller)
- *
- * Gesture lock: once the dominant axis is identified it stays locked
- * until ALL fingers are lifted. This prevents accidental mode switching
- * mid-gesture and makes the UX feel intentional and precise.
+ *   ↑↓  → depth (forward / back along camera forward vector)
+ *   ←→  → horizontal pan (left / right along camera right vector)
  */
 
-// ─── Tuning ───────────────────────────────────────────────────────────────────
-
-const DEPTH_SENSITIVITY      = 0.005   // m per pixel (single finger depth)
-const HORIZONTAL_SENSITIVITY = 0.005   // m per pixel (single finger pan)
-const ROTATION_SENSITIVITY   = 2.5     // rad per normalised horizontal delta
+const DEPTH_SENSITIVITY      = 0.005
+const HORIZONTAL_SENSITIVITY = 0.005
 const SCALE_MIN              = 0.02
 const SCALE_MAX              = 5.0
-
-// Two-finger gesture lock thresholds
-const LOCK_THRESHOLD         = 18      // px total movement before we commit to a gesture
-const DOMINANCE_RATIO        = 1.8     // dominant axis must be this much larger than other
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type TwoFingerMode = 'undecided' | 'rotation' | 'scale'
-
-interface SingleFingerState {
-  id:    number
-  lastX: number
-  lastY: number
-}
-
-interface TwoFingerState {
-  idA:        number
-  idB:        number
-  // Accumulated deltas while undecided (used to determine dominant axis)
-  accumDx:    number   // sum of |horizontal midpoint deltas|
-  accumDy:    number   // sum of |spread changes| (for scale detection)
-  // Baseline values captured at lock moment
-  initSpread: number
-  initScale:  number
-  prevAngle:  number
-  prevMidX:   number
-  prevMidY:   number
-  mode:       TwoFingerMode
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
+// How many radians of model rotation per radian of finger-line rotation
+const ROTATION_SENSITIVITY   = 1.0
+// Minimum spread (px) to avoid division instability
+const MIN_SPREAD             = 10
 
 export class GestureHandler {
   private active = false
   private listeners: Array<[EventTarget, string, EventListener]> = []
 
-  private sf: SingleFingerState | null = null
-  private tf: TwoFingerState    | null = null
+  // ── Single-finger state ───────────────────────────────────────────────────
+  private sf: {id: number; lastX: number; lastY: number} | null = null
+
+  // ── Two-finger state ──────────────────────────────────────────────────────
+  private tf: {
+    idA:       number
+    idB:       number
+    prevAngle: number   // angle of line A→B (radians) at previous frame
+    prevSpread: number  // distance between fingers at previous frame
+    baseScale:  number  // model scale when gesture started
+    initSpread: number  // spread when gesture started (for ratio-based scale)
+  } | null = null
 
   constructor(
     private readonly terrainEid: any,
@@ -66,7 +48,7 @@ export class GestureHandler {
     private readonly THREE: any,
   ) {}
 
-  // ── Public ────────────────────────────────────────────────────────────────
+  // ── Public API ────────────────────────────────────────────────────────────
 
   attach(): void {
     if (this.active) return
@@ -85,13 +67,13 @@ export class GestureHandler {
     this.tf = null
   }
 
-  // ── Wiring ────────────────────────────────────────────────────────────────
+  // ── Event wiring ──────────────────────────────────────────────────────────
 
   private _on(
     target: EventTarget,
-    type:   string,
-    fn:     EventListener,
-    opts?:  AddEventListenerOptions,
+    type: string,
+    fn: EventListener,
+    opts?: AddEventListenerOptions,
   ): void {
     target.addEventListener(type, fn, opts)
     this.listeners.push([target, type, fn])
@@ -103,25 +85,19 @@ export class GestureHandler {
     const touches = Array.from(e.touches)
 
     if (touches.length >= 2) {
-      // Cancel any single-finger gesture
-      this.sf = null
+      this.sf = null  // cancel single finger
 
-      // Only init two-finger state if not already tracking
       if (!this.tf) {
         const a = touches[0]
         const b = touches[1]
-        const mid = this._midpoint(a, b)
+        const spread = this._spread(a, b)
         this.tf = {
           idA:        a.identifier,
           idB:        b.identifier,
-          accumDx:    0,
-          accumDy:    0,
-          initSpread: this._spread(a, b),
-          initScale:  this._getScale(),
           prevAngle:  this._angle(a, b),
-          prevMidX:   mid.x,
-          prevMidY:   mid.y,
-          mode:       'undecided',
+          prevSpread: spread,
+          baseScale:  this._getScale(),
+          initSpread: spread,
         }
       }
       return
@@ -145,78 +121,37 @@ export class GestureHandler {
       const a = touches.find(t => t.identifier === this.tf!.idA) ?? touches[0]
       const b = touches.find(t => t.identifier === this.tf!.idB) ?? touches[1]
 
-      const currentSpread = this._spread(a, b)
       const currentAngle  = this._angle(a, b)
-      const currentMid    = this._midpoint(a, b)
+      const currentSpread = this._spread(a, b)
 
-      // Deltas from previous frame
-      const dMidX    = Math.abs(currentMid.x - this.tf.prevMidX)
-      const dSpread  = Math.abs(currentSpread - this.tf.initSpread)
+      // ── ROTATION ──────────────────────────────────────────────────────
+      // The angle of the line connecting finger A to finger B.
+      // When that line rotates, we rotate the model by the same delta.
+      // Wraps correctly through ±π using atan2 delta.
+      const angleDelta = this._angleDelta(this.tf.prevAngle, currentAngle)
 
-      // ── Undecided: accumulate movement to find dominant axis ────────────
-      if (this.tf.mode === 'undecided') {
-        this.tf.accumDx += dMidX
-        this.tf.accumDy += Math.abs(currentSpread - (this.tf.initSpread + this.tf.accumDy))
-
-        const totalMovement = this.tf.accumDx + dSpread
-
-        if (totalMovement >= LOCK_THRESHOLD) {
-          // Enough movement accumulated — determine dominant axis
-          const horizScore = this.tf.accumDx
-          const vertScore  = dSpread  // how much spread has changed
-
-          if (horizScore > vertScore * DOMINANCE_RATIO) {
-            this.tf.mode = 'rotation'
-          } else if (vertScore > horizScore * DOMINANCE_RATIO) {
-            this.tf.mode      = 'scale'
-            this.tf.initSpread = currentSpread   // lock spread baseline at decision moment
-            this.tf.initScale  = this._getScale()
-          } else {
-            // Not dominant enough — keep accumulating
-          }
-        }
-
-        // Update prev values but don't apply anything yet
-        this.tf.prevMidX  = currentMid.x
-        this.tf.prevMidY  = currentMid.y
-        this.tf.prevAngle = currentAngle
-        return
+      if (Math.abs(angleDelta) > 0.0008) {
+        const rot = angleDelta * ROTATION_SENSITIVITY
+        const half = rot * 0.5
+        this.world.transform.rotateSelf(this.terrainEid, {
+          x: 0,
+          y: Math.sin(half),
+          z: 0,
+          w: Math.cos(half),
+        })
       }
 
-      // ── ROTATION mode ───────────────────────────────────────────────────
-      if (this.tf.mode === 'rotation') {
-        // Use horizontal midpoint delta directly for intuitive feel:
-        // moving both fingers right → rotate right, left → rotate left
-        const midDeltaX = currentMid.x - this.tf.prevMidX
-
-        if (Math.abs(midDeltaX) > 0.2) {
-          // Convert pixel delta to radians
-          // Normalise by screen width so speed is consistent across devices
-          const screenWidth  = window.innerWidth || 375
-          const rotationRad  = (midDeltaX / screenWidth) * Math.PI * ROTATION_SENSITIVITY
-
-          const half = rotationRad * 0.5
-          this.world.transform.rotateSelf(this.terrainEid, {
-            x: 0,
-            y: Math.sin(half),
-            z: 0,
-            w: Math.cos(half),
-          })
-        }
-      }
-
-      // ── SCALE mode ──────────────────────────────────────────────────────
-      if (this.tf.mode === 'scale') {
-        // Ratio of current spread to spread at lock moment
+      // ── SCALE ─────────────────────────────────────────────────────────
+      // Ratio of current spread to spread at gesture start.
+      // Multiply by the scale captured at gesture start for no drift.
+      if (currentSpread > MIN_SPREAD && this.tf.initSpread > MIN_SPREAD) {
         const ratio    = currentSpread / this.tf.initSpread
-        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.initScale * ratio))
+        const newScale = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * ratio))
         this._setScale(newScale)
       }
 
-      // Update prev values
-      this.tf.prevMidX  = currentMid.x
-      this.tf.prevMidY  = currentMid.y
-      this.tf.prevAngle = currentAngle
+      this.tf.prevAngle  = currentAngle
+      this.tf.prevSpread = currentSpread
       return
     }
 
@@ -266,11 +201,9 @@ export class GestureHandler {
     const remaining = Array.from(e.touches)
 
     if (remaining.length === 0) {
-      // All fingers lifted — full reset
       this.sf = null
       this.tf = null
     } else if (remaining.length === 1) {
-      // Dropped from two fingers to one
       this.tf = null
       const t = remaining[0]
       this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY}
@@ -284,21 +217,31 @@ export class GestureHandler {
 
   // ── Math helpers ──────────────────────────────────────────────────────────
 
+  /** Euclidean distance between two touch points. */
   private _spread(a: Touch, b: Touch): number {
     const dx = a.clientX - b.clientX
     const dy = a.clientY - b.clientY
-    return Math.sqrt(dx * dx + dy * dy) || 1
+    return Math.sqrt(dx * dx + dy * dy)
   }
 
+  /**
+   * Angle (radians) of the vector from touch A to touch B.
+   * Uses atan2 so it covers full ±π range.
+   */
   private _angle(a: Touch, b: Touch): number {
     return Math.atan2(b.clientY - a.clientY, b.clientX - a.clientX)
   }
 
-  private _midpoint(a: Touch, b: Touch): {x: number; y: number} {
-    return {
-      x: (a.clientX + b.clientX) / 2,
-      y: (a.clientY + b.clientY) / 2,
-    }
+  /**
+   * Shortest signed angle delta between two atan2 angles.
+   * Handles wrap-around at ±π correctly.
+   */
+  private _angleDelta(prev: number, current: number): number {
+    let delta = current - prev
+    // Normalise to [-π, π]
+    while (delta >  Math.PI) delta -= 2 * Math.PI
+    while (delta < -Math.PI) delta += 2 * Math.PI
+    return delta
   }
 
   // ── ECS / Three.js accessors ──────────────────────────────────────────────
