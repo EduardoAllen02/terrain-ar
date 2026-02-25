@@ -59,12 +59,6 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-function getActiveCamera(world: any): any {
-  let cam: any = null
-  world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
-  return cam
-}
-
 ecs.registerComponent({
   name: 'terrain-tap-place',
 
@@ -89,11 +83,10 @@ ecs.registerComponent({
 
     const ui         = new ArUiOverlay()
     const billboards = new BillboardManager(THREE, {
-      texturesPath:      'assets/pois/',
-      baseSize:          0.10,
-      referenceDistance: 1.5,
-      verticalOffset:    0.025,
-      debug:             false,
+      texturesPath:   'assets/pois/',
+      baseSize:       0.10,
+      verticalOffset: 0.025,
+      debug:          false,
     })
 
     const doReady  = ecs.defineTrigger()
@@ -178,8 +171,8 @@ ecs.registerComponent({
       })
 
       .onTick(() => {
-        const cam = getActiveCamera(world)
-        if (cam) billboards.update(cam)
+        const terrainObj = getTerrainObj()
+        if (terrainObj) billboards.update(terrainObj)
       })
 
       .onExit(() => {

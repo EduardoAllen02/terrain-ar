@@ -2,7 +2,6 @@ export interface BillboardOptions {
   texturesPath?: string
   textureExt?: string
   baseSize?: number
-  referenceDistance?: number
   verticalOffset?: number
   nodePrefix?: string
   debug?: boolean
@@ -16,7 +15,8 @@ interface Billboard {
 
 export class BillboardManager {
   private billboards: Billboard[] = []
-  private _v3: any
+  private _v3:    any
+  private _scale: any
   private opts: Required<BillboardOptions>
 
   constructor(
@@ -24,20 +24,20 @@ export class BillboardManager {
     opts: BillboardOptions = {},
   ) {
     this.opts = {
-      texturesPath:      opts.texturesPath      ?? 'assets/pois/',
-      textureExt:        opts.textureExt        ?? 'png',
-      baseSize:          opts.baseSize          ?? 0.12,
-      referenceDistance: opts.referenceDistance ?? 1.5,
-      verticalOffset:    opts.verticalOffset    ?? 0.02,
-      nodePrefix:        opts.nodePrefix        ?? 'poi_',
-      debug:             opts.debug             ?? false,
+      texturesPath:   opts.texturesPath   ?? 'assets/pois/',
+      textureExt:     opts.textureExt     ?? 'png',
+      baseSize:       opts.baseSize       ?? 0.10,
+      verticalOffset: opts.verticalOffset ?? 0.025,
+      nodePrefix:     opts.nodePrefix     ?? 'poi_',
+      debug:          opts.debug          ?? false,
     }
   }
 
   async init(terrainObject: any, scene: any): Promise<void> {
     const { THREE, opts } = this
-    this._v3 = new THREE.Vector3()
-    const loader   = new THREE.TextureLoader()
+    this._v3    = new THREE.Vector3()
+    this._scale = new THREE.Vector3()
+    const loader  = new THREE.TextureLoader()
     const pending: Promise<void>[] = []
 
     terrainObject.traverse((node: any) => {
@@ -70,17 +70,20 @@ export class BillboardManager {
     await Promise.all(pending)
   }
 
-  update(camera: any): void {
-    const { opts, _v3 } = this
+  update(terrainObject: any): void {
+    const { opts, _v3, _scale } = this
+
+    terrainObject.getWorldScale(_scale)
+    const terrainScale = _scale.x
+
     for (const { sprite, anchor } of this.billboards) {
       anchor.getWorldPosition(_v3)
-      _v3.y += opts.verticalOffset
+      _v3.y += opts.verticalOffset * terrainScale
       sprite.position.copy(_v3)
 
-      const dist  = camera.position.distanceTo(_v3)
-      const scale = (opts.baseSize * dist) / opts.referenceDistance
+      const size  = opts.baseSize * terrainScale
       const ratio = this._getAspect(sprite)
-      sprite.scale.set(scale * ratio, scale, 1)
+      sprite.scale.set(size * ratio, size, 1)
     }
   }
 
