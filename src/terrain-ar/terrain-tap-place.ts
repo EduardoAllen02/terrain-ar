@@ -1,39 +1,12 @@
-/**
- * terrain-tap-place — v6 (Option C)
- *
- * Auto-placement: model appears as soon as SLAM detects the first surface.
- * No tap required, no dot tower, no floor shadow.
- *
- * ── Tuning constants (adjust these freely) ───────────────────────────────────
- *
- *  CAMERA_OFFSET   How many metres to shift the placement point TOWARD the
- *                  camera from the actual raycast hit. Higher = model appears
- *                  closer to you. (default 0.6)
- *
- *  INITIAL_SCALE   Uniform scale of the model when it first appears.
- *                  1.0 = original GLB size. (default 0.28)
- *
- *  Y_ABOVE_GROUND  Extra height above the detected surface. 0 = sits on floor.
- *                  Small positive value avoids z-fighting. (default 0.01)
- *
- * ─────────────────────────────────────────────────────────────────────────────
- */
-
 import * as ecs from '@8thwall/ecs'
-import {GestureHandler} from './gesture-handler'
-import {ArUiOverlay}    from './ar-ui-overlay'
+import {GestureHandler}    from './gesture-handler'
+import {ArUiOverlay}       from './ar-ui-overlay'
+import {BillboardManager}  from './billboard-manager'
 
-// ══ TUNING — change these to adjust model position and size ══════════════════
-
-const CAMERA_OFFSET  = 0.6    // metres toward camera from raycast hit
-const INITIAL_SCALE  = 0.28   // starting scale (tweak until it looks right)
-const Y_ABOVE_GROUND = 1.0   // metres above detected floor
-
-// ════════════════════════════════════════════════════════════════════════════
-
-const HIDDEN_SCALE   = 0.00001  // effectively invisible, keeps asset loading
-
-// ─── Material helpers ─────────────────────────────────────────────────────────
+const CAMERA_OFFSET  = 0.6
+const INITIAL_SCALE  = 0.28
+const Y_ABOVE_GROUND = 1.0
+const HIDDEN_SCALE   = 0.00001
 
 type MeshEntry = { mesh: any; original: any }
 
@@ -47,9 +20,7 @@ function captureAndGrey(THREE: any, obj: any, store: MeshEntry[]): void {
     if (!child.isMesh) return
     store.push({
       mesh:     child,
-      original: Array.isArray(child.material)
-        ? child.material.slice()
-        : child.material,
+      original: Array.isArray(child.material) ? child.material.slice() : child.material,
     })
     child.material = Array.isArray(child.material)
       ? child.material.map(() => greyMat)
@@ -76,10 +47,6 @@ function isModelReady(world: any, terrainEid: any): boolean {
   return ready
 }
 
-/**
- * Given a raycast hit point and the camera position, return a point shifted
- * CAMERA_OFFSET metres toward the camera (XZ plane only, Y unchanged).
- */
 function offsetTowardCamera(
   THREE: any,
   hitX: number, hitZ: number,
@@ -89,13 +56,14 @@ function offsetTowardCamera(
   const dir = new THREE.Vector3(camX - hitX, 0, camZ - hitZ)
   if (dir.lengthSq() < 0.0001) return {x: hitX, z: hitZ}
   dir.normalize()
-  return {
-    x: hitX + dir.x * offset,
-    z: hitZ + dir.z * offset,
-  }
+  return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ─── ECS Component ───────────────────────────────────────────────────────────
+function getActiveCamera(world: any): any {
+  let cam: any = null
+  world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
+  return cam
+}
 
 ecs.registerComponent({
   name: 'terrain-tap-place',
@@ -119,19 +87,24 @@ ecs.registerComponent({
     let gestures:    GestureHandler | null = null
     let materialsApplied = false
 
-    const ui       = new ArUiOverlay()
+    const ui         = new ArUiOverlay()
+    const billboards = new BillboardManager(THREE, {
+      texturesPath:      'assets/pois/',
+      baseSize:          0.10,
+      referenceDistance: 1.5,
+      verticalOffset:    0.025,
+      debug:             false,
+    })
+
     const doReady  = ecs.defineTrigger()
     const doPlaced = ecs.defineTrigger()
 
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
 
-    // ── STATE: loading ────────────────────────────────────────────────────────
-
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
-        // Scale to near-zero at origin — stays in-world so engine streams asset
         world.setPosition(schema.terrainEntity, 0, 0, 0)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
@@ -145,10 +118,6 @@ ecs.registerComponent({
         if (isModelReady(world, schema.terrainEntity)) doReady.trigger()
       })
       .onTrigger(doReady, 'scanning')
-
-    // ── STATE: scanning ───────────────────────────────────────────────────────
-    // Raycast every tick. On FIRST hit: apply grey materials, position model,
-    // restore materials, activate gestures → placed.
 
     ecs.defineState('scanning')
       .onEnter(() => {
@@ -166,20 +135,14 @@ ecs.registerComponent({
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         if (groundHits.length === 0) return
 
-        const hit = groundHits[0].point
-
-        // Get camera world position for offset calculation
+        const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
 
         const {x: px, z: pz} = offsetTowardCamera(
-          THREE,
-          hit.x, hit.z,
-          camPos.x, camPos.z,
-          CAMERA_OFFSET,
+          THREE, hit.x, hit.z, camPos.x, camPos.z, CAMERA_OFFSET,
         )
         const py = hit.y + Y_ABOVE_GROUND
 
-        // Apply grey preview materials once
         if (!materialsApplied) {
           const obj = getTerrainObj()
           if (obj) {
@@ -188,34 +151,41 @@ ecs.registerComponent({
           }
         }
 
-        // Position and scale model
         world.setPosition(schema.terrainEntity, px, py, pz)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
         })
 
-        // Auto-place immediately on first surface detection
         doPlaced.trigger()
       })
 
       .onTrigger(doPlaced, 'placed')
 
-    // ── STATE: placed ─────────────────────────────────────────────────────────
-
     ecs.defineState('placed')
-      .onEnter(() => {
-        // Restore original textures
+      .onEnter(async () => {
         restoreMaterials(matStore)
         materialsApplied = false
 
-        // Activate gesture controls
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
+
+        const terrainObj = getTerrainObj()
+        if (terrainObj) {
+          await billboards.init(terrainObj, world.three.scene)
+        }
+
+        dataAttribute.cursor(eid).placed = true
+      })
+
+      .onTick(() => {
+        const cam = getActiveCamera(world)
+        if (cam) billboards.update(cam)
       })
 
       .onExit(() => {
         gestures?.detach()
         gestures = null
+        billboards.dispose(world.three.scene)
       })
   },
 
