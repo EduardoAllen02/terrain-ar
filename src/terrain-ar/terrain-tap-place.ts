@@ -88,7 +88,7 @@ ecs.registerComponent({
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
     const boards   = new BillboardManager(THREE, {
-      baseSize:       0.8,
+      baseSize:       8.0,
       verticalOffset: 0.025,
       debug:          false,
       onHotspotTap: (name) => {
