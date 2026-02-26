@@ -20,13 +20,10 @@ const injectStyles = (() => {
         touch-action: none;
       }
       #v360-overlay.v360-visible { opacity: 1; }
-
       #v360-canvas {
         position: absolute; inset: 0;
-        width: 100%; height: 100%;
-        display: block;
+        width: 100%; height: 100%; display: block;
       }
-
       #v360-topbar {
         position: absolute; top: 0; left: 0; right: 0;
         display: flex; align-items: center; justify-content: center;
@@ -46,7 +43,6 @@ const injectStyles = (() => {
         transition: background 0.15s;
       }
       #v360-back:active { background: rgba(235,248,255,0.98); }
-
       #v360-title {
         background: rgba(255,255,255,0.92); border-radius: 18px;
         padding: 7px 18px;
@@ -57,7 +53,6 @@ const injectStyles = (() => {
         max-width: 48vw; white-space: nowrap;
         overflow: hidden; text-overflow: ellipsis;
       }
-
       .v360-nav {
         position: absolute; top: 50%; transform: translateY(-50%);
         z-index: 2; background: rgba(255,255,255,0.92); border: none;
@@ -74,7 +69,6 @@ const injectStyles = (() => {
       #v360-prev { left: 14px; }
       #v360-next { right: 14px; }
       .v360-nav svg { color: #4ab8d8; }
-
       #v360-counter {
         position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
         display: flex; gap: 6px; z-index: 2;
@@ -84,7 +78,6 @@ const injectStyles = (() => {
         background: rgba(255,255,255,0.35); transition: background 0.2s;
       }
       .v360-dot.active { background: rgba(255,255,255,0.95); }
-
       #v360-hint {
         position: absolute; bottom: 52px; left: 50%; transform: translateX(-50%);
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -94,23 +87,19 @@ const injectStyles = (() => {
         pointer-events: none; z-index: 2; transition: opacity 0.5s;
       }
       #v360-hint.v360-hidden { opacity: 0; }
-
       #v360-loading {
         position: absolute; inset: 0;
         display: flex; align-items: center; justify-content: center;
-        background: rgba(0,0,0,0.55); z-index: 3;
-        transition: opacity 0.3s;
+        background: rgba(0,0,0,0.55); z-index: 3; transition: opacity 0.3s;
       }
       #v360-loading.v360-hidden { opacity: 0; pointer-events: none; }
       .v360-spinner {
         width: 32px; height: 32px;
         border: 2px solid rgba(74,184,216,0.25);
-        border-top-color: #4ab8d8;
-        border-radius: 50%;
+        border-top-color: #4ab8d8; border-radius: 50%;
         animation: v360-spin 0.8s linear infinite;
       }
       @keyframes v360-spin { to { transform: rotate(360deg); } }
-
       #v360-gyro-badge {
         position: absolute; top: 72px; right: 14px;
         background: rgba(0,0,0,0.45); border-radius: 12px;
@@ -135,24 +124,25 @@ export class Viewer360 {
   private texLoader: any = null
   private rafId      = 0
 
+  // Texture cache — keyed by POI name, disposed on full close
+  private texCache  = new Map<string, any>()
+
   // Gyro
   private _gyroHandler: ((e: DeviceOrientationEvent) => void) | null = null
-  private _alpha  = 0
-  private _beta   = 90
-  private _gamma  = 0
+  private _alpha = 0; private _beta = 90; private _gamma = 0
   private _gyroOk = false
 
-  // Three.js helpers
+  // Three helpers
   private _euler: any = null
-  private _q1:    any = null   // -90° around X, maps device to camera space
+  private _q1:    any = null
   private _qOrient: any = null
   private _zee:   any = null
 
-  // Touch drag fallback
-  private _touchDrag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
-  private _touchMoveHandler: ((e: TouchEvent) => void) | null = null
-  private _touchStartHandler: ((e: TouchEvent) => void) | null = null
-  private _touchEndHandler:   ((e: TouchEvent) => void) | null = null
+  // Touch drag
+  private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
+  private _onTouchStart: ((e: TouchEvent) => void) | null = null
+  private _onTouchMove:  ((e: TouchEvent) => void) | null = null
+  private _onTouchEnd:   (() => void)              | null = null
 
   constructor(private readonly THREE: any) {}
 
@@ -166,17 +156,11 @@ export class Viewer360 {
     injectStyles()
     registry.setCurrent(name)
 
-    const gyroAvailable = await this._requestGyroPermission()
-
-    this._buildOverlay(name, registry, gyroAvailable, onClose)
+    const gyroOk = await this._requestGyroPermission()
+    this._buildOverlay(name, registry, gyroOk, onClose)
     this._initRenderer()
-
-    if (gyroAvailable) {
-      this._startGyro()
-    } else {
-      this._startTouchDrag()
-    }
-
+    if (gyroOk) this._startGyro()
+    else         this._startTouchDrag()
     this._startLoop()
     await this._loadImage(name)
     this._hideLoading()
@@ -191,7 +175,10 @@ export class Viewer360 {
     const el = this.overlay
     if (el) {
       el.classList.remove('v360-visible')
-      setTimeout(() => { el.remove(); this._disposeRenderer() }, 380)
+      setTimeout(() => {
+        el.remove()
+        this._fullDispose()   // dispose renderer + ALL cached textures
+      }, 380)
     }
     this.overlay = null
     onClose()
@@ -200,25 +187,17 @@ export class Viewer360 {
   // ── UI ────────────────────────────────────────────────────────────────────
 
   private _buildOverlay(
-    name:          string,
-    registry:      ExperienceRegistry,
-    gyroAvailable: boolean,
-    onClose:       () => void,
+    name: string, registry: ExperienceRegistry,
+    gyroOk: boolean, onClose: () => void,
   ): void {
     const count    = registry.getCount()
-    const hintText = gyroAvailable
-      ? 'Mueve el teléfono para explorar'
-      : 'Arrastra para explorar'
+    const hintText = gyroOk ? 'Mueve el teléfono para explorar' : 'Arrastra para explorar'
 
     const div = document.createElement('div')
     div.id = 'v360-overlay'
     div.innerHTML = `
       <canvas id="v360-canvas"></canvas>
-
-      <div id="v360-loading">
-        <div class="v360-spinner"></div>
-      </div>
-
+      <div id="v360-loading"><div class="v360-spinner"></div></div>
       <div id="v360-topbar">
         <button id="v360-back">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -228,11 +207,9 @@ export class Viewer360 {
           </svg>
           Mapa AR
         </button>
-        <span id="v360-title">${this._formatName(name)}</span>
+        <span id="v360-title">${this._fmt(name)}</span>
       </div>
-
-      ${!gyroAvailable ? `<div id="v360-gyro-badge">Modo táctil</div>` : ''}
-
+      ${!gyroOk ? `<div id="v360-gyro-badge">Modo táctil</div>` : ''}
       ${count > 1 ? `
         <button class="v360-nav" id="v360-prev" aria-label="Anterior">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
@@ -250,11 +227,8 @@ export class Viewer360 {
         </button>
         <div id="v360-counter">
           ${Array.from({length: count}, (_, i) =>
-            `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`
-          ).join('')}
-        </div>
-      ` : ''}
-
+            `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`).join('')}
+        </div>` : ''}
       <span id="v360-hint">${hintText}</span>
     `
 
@@ -266,38 +240,36 @@ export class Viewer360 {
     if (count > 1) {
       div.querySelector('#v360-prev')!.addEventListener('click', async () => {
         const next = registry.navigatePrev()
-        if (next) await this._navigateTo(next, registry)
+        if (next) await this._navTo(next, registry)
       })
       div.querySelector('#v360-next')!.addEventListener('click', async () => {
         const next = registry.navigateNext()
-        if (next) await this._navigateTo(next, registry)
+        if (next) await this._navTo(next, registry)
       })
     }
 
     requestAnimationFrame(() => div.classList.add('v360-visible'))
   }
 
-  private async _navigateTo(name: string, registry: ExperienceRegistry): Promise<void> {
+  private async _navTo(name: string, registry: ExperienceRegistry): Promise<void> {
     this._showLoading()
     this._updateTitle(name)
     this._updateDots(registry)
-    // Reset touch drag orientation for new scene
-    this._touchDrag.lon = 0
-    this._touchDrag.lat = 0
+    this._drag.lon = 0; this._drag.lat = 0
     await this._loadImage(name)
     this._hideLoading()
   }
 
   private _updateTitle(name: string): void {
     const el = this.overlay?.querySelector('#v360-title')
-    if (el) el.textContent = this._formatName(name)
+    if (el) el.textContent = this._fmt(name)
   }
 
   private _updateDots(registry: ExperienceRegistry): void {
     const dots = this.overlay?.querySelectorAll('.v360-dot')
     if (!dots) return
     const idx = (registry as any).idx as number
-    dots.forEach((dot, i) => dot.classList.toggle('active', i === idx))
+    dots.forEach((d, i) => d.classList.toggle('active', i === idx))
   }
 
   private _showLoading(): void {
@@ -314,9 +286,7 @@ export class Viewer360 {
     }, 3500)
   }
 
-  private _formatName(name: string): string {
-    return name.replace(/_/g, ' ')
-  }
+  private _fmt(name: string): string { return name.replace(/_/g, ' ') }
 
   // ── Three.js ──────────────────────────────────────────────────────────────
 
@@ -324,16 +294,15 @@ export class Viewer360 {
     const { THREE } = this
     const canvas    = document.getElementById('v360-canvas') as HTMLCanvasElement
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
     this.renderer.setSize(window.innerWidth, window.innerHeight)
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
 
     this.scene  = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
-
+    this.camera = new THREE.PerspectiveCamera(
+      75, window.innerWidth / window.innerHeight, 0.1, 1000,
+    )
     this.texLoader = new THREE.TextureLoader()
-
-    // Pre-alloc quaternion helpers (Three.js DeviceOrientationControls approach)
     this._euler   = new THREE.Euler()
     this._q1      = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
     this._qOrient = new THREE.Quaternion()
@@ -342,21 +311,31 @@ export class Viewer360 {
 
   private async _loadImage(name: string): Promise<void> {
     const { THREE } = this
-    const url       = `${IMAGES_PATH}${name}${IMAGE_EXT}`
 
+    // Dispose current sphere mesh but NOT the texture (cached for nav)
     if (this.sphere) {
       this.scene.remove(this.sphere)
-      this.sphere.material.map?.dispose()
       this.sphere.material.dispose()
       this.sphere.geometry.dispose()
       this.sphere = null
     }
 
-    const texture: any = await new Promise(resolve => {
-      this.texLoader.load(url, resolve, undefined, () => resolve(null))
-    })
-
-    if (texture) texture.colorSpace = THREE.SRGBColorSpace ?? THREE.sRGBEncoding
+    // Use cached texture if available, otherwise load
+    let texture = this.texCache.get(name) ?? null
+    if (!texture) {
+      texture = await new Promise(resolve => {
+        this.texLoader.load(
+          `${IMAGES_PATH}${name}${IMAGE_EXT}`,
+          resolve,
+          undefined,
+          () => resolve(null),
+        )
+      })
+      if (texture) {
+        texture.colorSpace = THREE.SRGBColorSpace ?? THREE.sRGBEncoding
+        this.texCache.set(name, texture)
+      }
+    }
 
     const geo = new THREE.SphereGeometry(500, 60, 40)
     geo.scale(-1, 1, 1)
@@ -368,14 +347,19 @@ export class Viewer360 {
     this.scene.add(this.sphere)
   }
 
-  private _disposeRenderer(): void {
+  private _fullDispose(): void {
+    // Dispose sphere
     if (this.sphere) {
-      this.sphere.material.map?.dispose()
-      this.sphere.material.dispose()
       this.sphere.geometry.dispose()
+      this.sphere.material.dispose()
+      this.sphere = null
     }
+    // Dispose ALL cached textures
+    this.texCache.forEach(tex => tex.dispose())
+    this.texCache.clear()
+    // Dispose renderer
     this.renderer?.dispose()
-    this.renderer = this.scene = this.camera = this.sphere = null
+    this.renderer = this.scene = this.camera = null
   }
 
   // ── Gyroscope ─────────────────────────────────────────────────────────────
@@ -386,9 +370,7 @@ export class Viewer360 {
       try {
         const result = await DOE.requestPermission()
         if (result !== 'granted') return false
-      } catch {
-        return false
-      }
+      } catch { return false }
     }
     return probeGyroscope(1200)
   }
@@ -412,76 +394,61 @@ export class Viewer360 {
     this._gyroOk = false
   }
 
-  // ── Touch drag fallback ───────────────────────────────────────────────────
+  // ── Touch drag ────────────────────────────────────────────────────────────
 
   private _startTouchDrag(): void {
-    const drag = this._touchDrag
-
-    this._touchStartHandler = (e: TouchEvent) => {
+    const d = this._drag
+    this._onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
-      drag.active = true
-      drag.lastX  = e.touches[0].clientX
-      drag.lastY  = e.touches[0].clientY
+      d.active = true; d.lastX = e.touches[0].clientX; d.lastY = e.touches[0].clientY
     }
-
-    this._touchMoveHandler = (e: TouchEvent) => {
-      if (!drag.active || e.touches.length !== 1) return
-      const dx   = e.touches[0].clientX - drag.lastX
-      const dy   = e.touches[0].clientY - drag.lastY
-      drag.lastX = e.touches[0].clientX
-      drag.lastY = e.touches[0].clientY
-      drag.lon  -= dx * 0.25
-      drag.lat  += dy * 0.15
-      drag.lat   = Math.max(-85, Math.min(85, drag.lat))
+    this._onTouchMove = (e: TouchEvent) => {
+      if (!d.active || e.touches.length !== 1) return
+      d.lon  -= (e.touches[0].clientX - d.lastX) * 0.25
+      d.lat  += (e.touches[0].clientY - d.lastY) * 0.15
+      d.lat   = Math.max(-85, Math.min(85, d.lat))
+      d.lastX = e.touches[0].clientX; d.lastY = e.touches[0].clientY
     }
-
-    this._touchEndHandler = () => { drag.active = false }
+    this._onTouchEnd = () => { d.active = false }
 
     const canvas = document.getElementById('v360-canvas')!
-    canvas.addEventListener('touchstart', this._touchStartHandler, { passive: true })
-    canvas.addEventListener('touchmove',  this._touchMoveHandler,  { passive: true })
-    canvas.addEventListener('touchend',   this._touchEndHandler,   { passive: true })
+    canvas.addEventListener('touchstart', this._onTouchStart, { passive: true })
+    canvas.addEventListener('touchmove',  this._onTouchMove,  { passive: true })
+    canvas.addEventListener('touchend',   this._onTouchEnd,   { passive: true })
   }
 
   private _stopTouchDrag(): void {
     const canvas = document.getElementById('v360-canvas')
     if (!canvas) return
-    if (this._touchStartHandler) canvas.removeEventListener('touchstart', this._touchStartHandler)
-    if (this._touchMoveHandler)  canvas.removeEventListener('touchmove',  this._touchMoveHandler)
-    if (this._touchEndHandler)   canvas.removeEventListener('touchend',   this._touchEndHandler)
-    this._touchStartHandler = this._touchMoveHandler = this._touchEndHandler = null
+    if (this._onTouchStart) canvas.removeEventListener('touchstart', this._onTouchStart)
+    if (this._onTouchMove)  canvas.removeEventListener('touchmove',  this._onTouchMove)
+    if (this._onTouchEnd)   canvas.removeEventListener('touchend',   this._onTouchEnd)
+    this._onTouchStart = this._onTouchMove = this._onTouchEnd = null
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
 
   private _startLoop(): void {
     const { THREE } = this
-
     const tick = () => {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
       if (this._gyroOk) {
-        // ── Gyro → camera quaternion ────────────────────────────────────────
-        // Compensate for screen orientation so it works in portrait AND landscape
-        // (fixes the "upside down" issue on iPad in landscape mode)
         const alpha  = THREE.MathUtils.degToRad(this._alpha)
         const beta   = THREE.MathUtils.degToRad(this._beta)
         const gamma  = THREE.MathUtils.degToRad(this._gamma)
         const orient = THREE.MathUtils.degToRad(
           window.screen?.orientation?.angle ?? (window as any).orientation ?? 0,
         )
-
         this._euler.set(beta, alpha, -gamma, 'YXZ')
         this.camera.quaternion.setFromEuler(this._euler)
         this.camera.quaternion.multiply(this._q1)
         this._qOrient.setFromAxisAngle(this._zee, -orient)
         this.camera.quaternion.multiply(this._qOrient)
       } else {
-        // ── Touch drag ──────────────────────────────────────────────────────
-        const { lon, lat } = this._touchDrag
-        const phi   = THREE.MathUtils.degToRad(90 - lat)
-        const theta = THREE.MathUtils.degToRad(lon)
+        const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
+        const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(
           500 * Math.sin(phi) * Math.cos(theta),
           500 * Math.cos(phi),
@@ -491,7 +458,6 @@ export class Viewer360 {
 
       this.renderer.render(this.scene, this.camera)
     }
-
     tick()
   }
 }

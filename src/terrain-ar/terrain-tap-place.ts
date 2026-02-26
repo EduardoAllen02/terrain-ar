@@ -11,30 +11,10 @@ const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
-// Minimum raycast frames required before auto-placing on RESCAN.
-// Gives SLAM time to re-settle after returning from 360.
-// First placement is still instant (1 frame).
+// Frames to wait during rescan before placing — lets SLAM re-settle
 const RESCAN_MIN_FRAMES = 45
 
 type MeshEntry = { mesh: any; original: any }
-
-function captureAndGrey(THREE: any, obj: any, store: MeshEntry[]): void {
-  store.length = 0
-  const greyMat = new THREE.MeshStandardMaterial({
-    color: 0x8eaec4, roughness: 0.75, metalness: 0.05,
-    transparent: true, opacity: 0.72,
-  })
-  obj.traverse((child: any) => {
-    if (!child.isMesh) return
-    store.push({
-      mesh:     child,
-      original: Array.isArray(child.material) ? child.material.slice() : child.material,
-    })
-    child.material = Array.isArray(child.material)
-      ? child.material.map(() => greyMat)
-      : greyMat
-  })
-}
 
 function restoreMaterials(store: MeshEntry[]): void {
   for (const {mesh, original} of store) mesh.material = original
@@ -65,22 +45,6 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-function hideArCamera(): void {
-  const xr8 = (window as any).XR8
-  if (xr8?.pause) { xr8.pause(); return }
-  document.querySelectorAll('canvas').forEach((c: HTMLCanvasElement) => {
-    if (c.id !== 'v360-canvas') c.style.visibility = 'hidden'
-  })
-}
-
-function showArCamera(): void {
-  const xr8 = (window as any).XR8
-  if (xr8?.resume) { xr8.resume(); return }
-  document.querySelectorAll('canvas').forEach((c: HTMLCanvasElement) => {
-    if (c.id !== 'v360-canvas') c.style.visibility = ''
-  })
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 ecs.registerComponent({
@@ -103,11 +67,11 @@ ecs.registerComponent({
 
     const matStore: MeshEntry[]         = []
     let gestures: GestureHandler | null = null
-    let materialsApplied                = false
-    let viewing360                      = false
-    let pendingRescan                   = false
-    let isRescan                        = false   // true when returning from 360
-    let scanFrames                      = 0       // counts frames during rescan delay
+
+    let viewing360    = false
+    let pendingRescan = false
+    let isRescan      = false   // true on return from 360 or manual reset
+    let scanFrames    = 0
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -120,10 +84,11 @@ ecs.registerComponent({
         if (viewing360) return
         viewing360 = true
         gestures?.detach()
-        hideArCamera()
+        ui.hideResetButton()
 
+        // 360 overlays on top of AR canvas — no XR8.pause() needed.
+        // Keeping AR running avoids the white-flash on resume.
         viewer.open(name, registry, () => {
-          showArCamera()
           viewing360    = false
           pendingRescan = true
         })
@@ -137,6 +102,13 @@ ecs.registerComponent({
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
 
+    const hideModel = () => {
+      world.setPosition(schema.terrainEntity, 0, -9999, 0)
+      ecs.Scale.set(world, schema.terrainEntity, {
+        x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
+      })
+    }
+
     // ── STATE: loading ──────────────────────────────────────────────────────
 
     ecs.defineState('loading')
@@ -144,10 +116,7 @@ ecs.registerComponent({
       .onEnter(() => {
         checkArSupport()
         checkCameraAccess(() => {}, () => {})
-        world.setPosition(schema.terrainEntity, 0, 0, 0)
-        ecs.Scale.set(world, schema.terrainEntity, {
-          x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
-        })
+        hideModel()
         if (ecs.Hidden.has(world, schema.terrainEntity)) {
           ecs.Hidden.remove(world, schema.terrainEntity)
         }
@@ -159,20 +128,23 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
+    // During rescan: model stays fully hidden while waiting RESCAN_MIN_FRAMES.
+    // No grey preview — ui.showRescanLoader() covers the background instead.
 
     ecs.defineState('scanning')
       .onEnter(() => {
-        ui.hideLoader()
-
-        // Force model out of world so old position is gone from ECS
-        world.setPosition(schema.terrainEntity, 0, -9999, 0)
-        ecs.Scale.set(world, schema.terrainEntity, {
-          x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
-        })
-
-        materialsApplied = false
-        scanFrames       = 0
+        hideModel()
+        restoreMaterials(matStore)   // safety: clear any leftover preview material
+        scanFrames = 0
         dataAttribute.cursor(eid).placed = false
+
+        if (isRescan) {
+          // Show scanning loader to cover the transition — hides the AR background
+          // briefly so user never sees a white flash or naked scene
+          ui.showRescanLoader()
+        } else {
+          ui.hideLoader()
+        }
       })
 
       .onTick(() => {
@@ -182,30 +154,10 @@ ecs.registerComponent({
 
         scanFrames++
 
-        // On rescan: wait RESCAN_MIN_FRAMES so SLAM re-settles on the real floor.
-        // On first placement: place immediately.
-        if (isRescan && scanFrames < RESCAN_MIN_FRAMES) {
-          // Still waiting — keep model hidden but show grey preview tracking
-          const hit    = groundHits[0].point
-          const camPos = ecs.Position.get(world, eid)
-          const {x: px, z: pz} = offsetTowardCamera(
-            THREE, hit.x, hit.z, camPos.x, camPos.z, CAMERA_OFFSET,
-          )
-          const py = hit.y + Y_ABOVE_GROUND
+        // Wait RESCAN_MIN_FRAMES on rescan so SLAM finds new real floor
+        if (isRescan && scanFrames < RESCAN_MIN_FRAMES) return
 
-          if (!materialsApplied) {
-            const obj = getTerrainObj()
-            if (obj) { captureAndGrey(THREE, obj, matStore); materialsApplied = true }
-          }
-          // Show grey preview tracking new position while SLAM settles
-          world.setPosition(schema.terrainEntity, px, py, pz)
-          ecs.Scale.set(world, schema.terrainEntity, {
-            x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
-          })
-          return
-        }
-
-        // Ready to place
+        // Floor confirmed — place model directly with real materials, no preview
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
         const {x: px, z: pz} = offsetTowardCamera(
@@ -213,16 +165,12 @@ ecs.registerComponent({
         )
         const py = hit.y + Y_ABOVE_GROUND
 
-        if (!materialsApplied) {
-          const obj = getTerrainObj()
-          if (obj) { captureAndGrey(THREE, obj, matStore); materialsApplied = true }
-        }
-
         world.setPosition(schema.terrainEntity, px, py, pz)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
         })
 
+        ui.hideLoader()   // hides both initial and rescan loaders
         doPlaced.trigger()
       })
 
@@ -232,9 +180,7 @@ ecs.registerComponent({
 
     ecs.defineState('placed')
       .onEnter(async () => {
-        isRescan = false   // reset for next cycle
-        restoreMaterials(matStore)
-        materialsApplied = false
+        isRescan = false
 
         gestures?.detach()
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
@@ -247,13 +193,24 @@ ecs.registerComponent({
           registry.register(hotspotNames)
         }
 
+        ui.showResetButton(() => {
+          // Reset: re-scan from scratch, keep 3D asset cached
+          gestures?.detach()
+          gestures = null
+          boards.dispose(world.three.scene)
+          restoreMaterials(matStore)
+          isRescan      = true
+          pendingRescan = false
+          doRescan.trigger()
+        })
+
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
         if (pendingRescan) {
           pendingRescan = false
-          isRescan      = true   // mark so scanning waits RESCAN_MIN_FRAMES
+          isRescan      = true
           doRescan.trigger()
           return
         }
@@ -268,6 +225,7 @@ ecs.registerComponent({
         gestures?.detach()
         gestures = null
         boards.dispose(world.three.scene)
+        ui.hideResetButton()
       })
 
       .onTrigger(doRescan, 'scanning')
