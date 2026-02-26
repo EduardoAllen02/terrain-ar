@@ -1,7 +1,9 @@
 import * as ecs from '@8thwall/ecs'
-import {GestureHandler}    from './gesture-handler'
-import {ArUiOverlay}       from './ar-ui-overlay'
-import {BillboardManager}  from './billboard-manager'
+import {GestureHandler}     from './gesture-handler'
+import {ArUiOverlay}        from './ar-ui-overlay'
+import {BillboardManager}   from './billboard-manager'
+import {ExperienceRegistry} from './experience-registry'
+import {Viewer360}          from './viewer-360'
 
 const CAMERA_OFFSET  = 0.6
 const INITIAL_SCALE  = 0.28
@@ -40,9 +42,7 @@ function isModelReady(world: any, terrainEid: any): boolean {
   obj.traverse((child: any) => {
     if (ready) return
     if (child.isMesh && child.geometry?.attributes &&
-        Object.keys(child.geometry.attributes).length > 0) {
-      ready = true
-    }
+        Object.keys(child.geometry.attributes).length > 0) ready = true
   })
   return ready
 }
@@ -58,6 +58,8 @@ function offsetTowardCamera(
   dir.normalize()
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 ecs.registerComponent({
   name: 'terrain-tap-place',
@@ -77,16 +79,29 @@ ecs.registerComponent({
     const schema  = schemaAttribute.get(eid)
     const {THREE} = window as any
 
-    const matStore: MeshEntry[]            = []
-    let gestures:    GestureHandler | null = null
-    let materialsApplied = false
+    const matStore: MeshEntry[]          = []
+    let gestures: GestureHandler | null  = null
+    let materialsApplied                 = false
+    let viewing360                       = false
 
-    const ui         = new ArUiOverlay()
-    const billboards = new BillboardManager(THREE, {
-      texturesPath:   'assets/pois/',
+    const ui       = new ArUiOverlay()
+    const registry = new ExperienceRegistry()
+    const viewer   = new Viewer360(THREE)
+    const boards   = new BillboardManager(THREE, {
       baseSize:       0.10,
       verticalOffset: 0.025,
       debug:          false,
+      onHotspotTap: (name) => {
+        if (viewing360) return
+        viewing360 = true
+        // Detach gestures while in 360 so accidental touches don't move model
+        gestures?.detach()
+        viewer.open(name, registry, () => {
+          // Back from 360 → restore AR gestures
+          viewing360 = false
+          gestures?.attach()
+        })
+      },
     })
 
     const doReady  = ecs.defineTrigger()
@@ -94,6 +109,8 @@ ecs.registerComponent({
 
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
+
+    // ── STATE: loading ──────────────────────────────────────────────────────
 
     ecs.defineState('loading')
       .initial()
@@ -111,6 +128,8 @@ ecs.registerComponent({
         if (isModelReady(world, schema.terrainEntity)) doReady.trigger()
       })
       .onTrigger(doReady, 'scanning')
+
+    // ── STATE: scanning ─────────────────────────────────────────────────────
 
     ecs.defineState('scanning')
       .onEnter(() => {
@@ -138,10 +157,7 @@ ecs.registerComponent({
 
         if (!materialsApplied) {
           const obj = getTerrainObj()
-          if (obj) {
-            captureAndGrey(THREE, obj, matStore)
-            materialsApplied = true
-          }
+          if (obj) { captureAndGrey(THREE, obj, matStore); materialsApplied = true }
         }
 
         world.setPosition(schema.terrainEntity, px, py, pz)
@@ -154,6 +170,8 @@ ecs.registerComponent({
 
       .onTrigger(doPlaced, 'placed')
 
+    // ── STATE: placed ───────────────────────────────────────────────────────
+
     ecs.defineState('placed')
       .onEnter(async () => {
         restoreMaterials(matStore)
@@ -164,21 +182,23 @@ ecs.registerComponent({
 
         const terrainObj = getTerrainObj()
         if (terrainObj) {
-          await billboards.init(terrainObj, world.three.scene)
+          const hotspotNames = await boards.init(terrainObj, world.three.scene)
+          registry.register(hotspotNames)
         }
 
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
+        if (viewing360) return   // 360 viewer has its own render loop
         const terrainObj = getTerrainObj()
-        if (terrainObj) billboards.update(terrainObj)
+        if (terrainObj) boards.update(terrainObj)
       })
 
       .onExit(() => {
         gestures?.detach()
         gestures = null
-        billboards.dispose(world.three.scene)
+        boards.dispose(world.three.scene)
       })
   },
 

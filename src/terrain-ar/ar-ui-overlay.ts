@@ -1,9 +1,3 @@
-/**
- * ArUiOverlay — v4 (Option C)
- * Simplified: only shows the loading spinner with phase messages.
- * No placement status pill needed — model auto-places.
- */
-
 const injectStyles = (() => {
   let done = false
   return () => {
