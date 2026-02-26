@@ -1,4 +1,5 @@
 import {ExperienceRegistry} from './experience-registry'
+import {probeGyroscope}     from './device-check'
 
 const IMAGES_PATH = 'assets/360/'
 const IMAGE_EXT   = '.jpg'
@@ -13,95 +14,56 @@ const injectStyles = (() => {
     const s = document.createElement('style')
     s.textContent = `
       #v360-overlay {
-        position: fixed;
-        inset: 0;
-        z-index: 99999;
+        position: fixed; inset: 0; z-index: 99999;
         background: #000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        opacity: 0;
-        transition: opacity 0.35s ease;
+        opacity: 0; transition: opacity 0.35s ease;
+        touch-action: none;
       }
       #v360-overlay.v360-visible { opacity: 1; }
 
       #v360-canvas {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
+        position: absolute; inset: 0;
+        width: 100%; height: 100%;
+        display: block;
       }
 
-      /* ── Top bar ── */
       #v360-topbar {
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        position: absolute; top: 0; left: 0; right: 0;
+        display: flex; align-items: center; justify-content: center;
         padding: 18px 16px 0;
-        pointer-events: none;
-        z-index: 2;
+        pointer-events: none; z-index: 2;
       }
-
       #v360-back {
-        position: absolute;
-        left: 16px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        background: rgba(255,255,255,0.92);
-        border: none;
-        border-radius: 22px;
+        position: absolute; left: 16px;
+        display: flex; align-items: center; gap: 6px;
+        background: rgba(255,255,255,0.92); border: none; border-radius: 22px;
         padding: 8px 16px 8px 10px;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 500;
-        color: #4ab8d8;
-        letter-spacing: 0.04em;
-        cursor: pointer;
-        pointer-events: all;
+        font-size: 13px; font-weight: 500; color: #4ab8d8;
+        letter-spacing: 0.04em; cursor: pointer; pointer-events: all;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
         -webkit-tap-highlight-color: transparent;
         transition: background 0.15s;
       }
       #v360-back:active { background: rgba(235,248,255,0.98); }
 
-      #v360-back svg { flex-shrink: 0; }
-
       #v360-title {
-        background: rgba(255,255,255,0.92);
-        border-radius: 18px;
+        background: rgba(255,255,255,0.92); border-radius: 18px;
         padding: 7px 18px;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 500;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: #4ab8d8;
+        font-size: 13px; font-weight: 500;
+        letter-spacing: 0.12em; text-transform: uppercase; color: #4ab8d8;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-        max-width: 50vw;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        max-width: 48vw; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis;
       }
 
-      /* ── Nav arrows ── */
       .v360-nav {
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        z-index: 2;
-        background: rgba(255,255,255,0.92);
-        border: none;
-        border-radius: 50%;
-        width: 48px;
-        height: 48px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.22);
+        position: absolute; top: 50%; transform: translateY(-50%);
+        z-index: 2; background: rgba(255,255,255,0.92); border: none;
+        border-radius: 50%; width: 48px; height: 48px;
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.22);
         -webkit-tap-highlight-color: transparent;
         transition: background 0.15s, transform 0.15s;
       }
@@ -113,55 +75,33 @@ const injectStyles = (() => {
       #v360-next { right: 14px; }
       .v360-nav svg { color: #4ab8d8; }
 
-      /* ── Counter ── */
       #v360-counter {
-        position: absolute;
-        bottom: 28px;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        gap: 6px;
-        z-index: 2;
+        position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 6px; z-index: 2;
       }
       .v360-dot {
-        width: 6px; height: 6px;
-        border-radius: 50%;
-        background: rgba(255,255,255,0.35);
-        transition: background 0.2s;
+        width: 6px; height: 6px; border-radius: 50%;
+        background: rgba(255,255,255,0.35); transition: background 0.2s;
       }
       .v360-dot.active { background: rgba(255,255,255,0.95); }
 
-      /* ── Gyro hint ── */
       #v360-hint {
-        position: absolute;
-        bottom: 52px;
-        left: 50%;
-        transform: translateX(-50%);
+        position: absolute; bottom: 52px; left: 50%; transform: translateX(-50%);
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 10px;
-        font-weight: 300;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        color: rgba(255,255,255,0.45);
-        white-space: nowrap;
-        pointer-events: none;
-        z-index: 2;
-        transition: opacity 0.5s;
+        font-size: 10px; font-weight: 300;
+        letter-spacing: 0.18em; text-transform: uppercase;
+        color: rgba(255,255,255,0.45); white-space: nowrap;
+        pointer-events: none; z-index: 2; transition: opacity 0.5s;
       }
-      #v360-hint.hidden { opacity: 0; }
+      #v360-hint.v360-hidden { opacity: 0; }
 
-      /* ── Loading spinner inside 360 ── */
       #v360-loading {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(0,0,0,0.55);
-        z-index: 3;
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(0,0,0,0.55); z-index: 3;
         transition: opacity 0.3s;
       }
-      #v360-loading.hidden { opacity: 0; pointer-events: none; }
+      #v360-loading.v360-hidden { opacity: 0; pointer-events: none; }
       .v360-spinner {
         width: 32px; height: 32px;
         border: 2px solid rgba(74,184,216,0.25);
@@ -170,6 +110,15 @@ const injectStyles = (() => {
         animation: v360-spin 0.8s linear infinite;
       }
       @keyframes v360-spin { to { transform: rotate(360deg); } }
+
+      #v360-gyro-badge {
+        position: absolute; top: 72px; right: 14px;
+        background: rgba(0,0,0,0.45); border-radius: 12px;
+        padding: 5px 10px; z-index: 2;
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+        color: rgba(255,255,255,0.55); pointer-events: none;
+      }
     `
     document.head.appendChild(s)
   }
@@ -186,16 +135,24 @@ export class Viewer360 {
   private texLoader: any = null
   private rafId      = 0
 
-  // Gyro state
+  // Gyro
   private _gyroHandler: ((e: DeviceOrientationEvent) => void) | null = null
-  private _alpha = 0
-  private _beta  = 90   // default: looking forward (portrait)
-  private _gamma = 0
-  private _gyroActive = false
+  private _alpha  = 0
+  private _beta   = 90
+  private _gamma  = 0
+  private _gyroOk = false
 
-  // Euler / quaternion helpers (created once per session)
+  // Three.js helpers
   private _euler: any = null
-  private _q1:    any = null
+  private _q1:    any = null   // -90° around X, maps device to camera space
+  private _qOrient: any = null
+  private _zee:   any = null
+
+  // Touch drag fallback
+  private _touchDrag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
+  private _touchMoveHandler: ((e: TouchEvent) => void) | null = null
+  private _touchStartHandler: ((e: TouchEvent) => void) | null = null
+  private _touchEndHandler:   ((e: TouchEvent) => void) | null = null
 
   constructor(private readonly THREE: any) {}
 
@@ -209,13 +166,18 @@ export class Viewer360 {
     injectStyles()
     registry.setCurrent(name)
 
-    await this._requestGyroPermission()
+    const gyroAvailable = await this._requestGyroPermission()
 
-    this._buildOverlay(name, registry, onClose)
+    this._buildOverlay(name, registry, gyroAvailable, onClose)
     this._initRenderer()
-    this._startGyro()
-    this._startLoop()
 
+    if (gyroAvailable) {
+      this._startGyro()
+    } else {
+      this._startTouchDrag()
+    }
+
+    this._startLoop()
     await this._loadImage(name)
     this._hideLoading()
     this._hideHintAfterDelay()
@@ -224,28 +186,29 @@ export class Viewer360 {
   private close(onClose: () => void): void {
     cancelAnimationFrame(this.rafId)
     this._stopGyro()
+    this._stopTouchDrag()
 
     const el = this.overlay
     if (el) {
       el.classList.remove('v360-visible')
-      setTimeout(() => {
-        el.remove()
-        this._disposeRenderer()
-      }, 380)
+      setTimeout(() => { el.remove(); this._disposeRenderer() }, 380)
     }
-
     this.overlay = null
     onClose()
   }
 
-  // ── Overlay / UI ──────────────────────────────────────────────────────────
+  // ── UI ────────────────────────────────────────────────────────────────────
 
   private _buildOverlay(
-    name:     string,
-    registry: ExperienceRegistry,
-    onClose:  () => void,
+    name:          string,
+    registry:      ExperienceRegistry,
+    gyroAvailable: boolean,
+    onClose:       () => void,
   ): void {
-    const count = registry.getCount()
+    const count    = registry.getCount()
+    const hintText = gyroAvailable
+      ? 'Mueve el teléfono para explorar'
+      : 'Arrastra para explorar'
 
     const div = document.createElement('div')
     div.id = 'v360-overlay'
@@ -259,7 +222,8 @@ export class Viewer360 {
       <div id="v360-topbar">
         <button id="v360-back">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+               stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
           Mapa AR
@@ -267,32 +231,36 @@ export class Viewer360 {
         <span id="v360-title">${this._formatName(name)}</span>
       </div>
 
+      ${!gyroAvailable ? `<div id="v360-gyro-badge">Modo táctil</div>` : ''}
+
       ${count > 1 ? `
         <button class="v360-nav" id="v360-prev" aria-label="Anterior">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+               stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
         </button>
         <button class="v360-nav" id="v360-next" aria-label="Siguiente">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+               stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 18 15 12 9 6"/>
           </svg>
         </button>
+        <div id="v360-counter">
+          ${Array.from({length: count}, (_, i) =>
+            `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`
+          ).join('')}
+        </div>
       ` : ''}
 
-      <span id="v360-hint">Mueve el teléfono para explorar</span>
-
-      ${count > 1 ? `<div id="v360-counter">${
-        Array.from({length: count}, (_, i) => `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`).join('')
-      }</div>` : ''}
+      <span id="v360-hint">${hintText}</span>
     `
 
     document.body.appendChild(div)
     this.overlay = div
 
-    // Wire buttons
     div.querySelector('#v360-back')!.addEventListener('click', () => this.close(onClose))
 
     if (count > 1) {
@@ -306,7 +274,6 @@ export class Viewer360 {
       })
     }
 
-    // Trigger fade-in
     requestAnimationFrame(() => div.classList.add('v360-visible'))
   }
 
@@ -314,6 +281,9 @@ export class Viewer360 {
     this._showLoading()
     this._updateTitle(name)
     this._updateDots(registry)
+    // Reset touch drag orientation for new scene
+    this._touchDrag.lon = 0
+    this._touchDrag.lat = 0
     await this._loadImage(name)
     this._hideLoading()
   }
@@ -326,29 +296,21 @@ export class Viewer360 {
   private _updateDots(registry: ExperienceRegistry): void {
     const dots = this.overlay?.querySelectorAll('.v360-dot')
     if (!dots) return
-    const current = registry.getCurrentName()
-    const names   = Array.from({length: registry.getCount()}, (_, i) => i)
-    dots.forEach((dot, i) => {
-      dot.classList.toggle('active', i === names.indexOf(
-        (registry as any).idx ?? 0,
-      ))
-    })
-    // Simpler: just mark the idx
     const idx = (registry as any).idx as number
     dots.forEach((dot, i) => dot.classList.toggle('active', i === idx))
   }
 
   private _showLoading(): void {
-    this.overlay?.querySelector('#v360-loading')?.classList.remove('hidden')
+    this.overlay?.querySelector('#v360-loading')?.classList.remove('v360-hidden')
   }
 
   private _hideLoading(): void {
-    this.overlay?.querySelector('#v360-loading')?.classList.add('hidden')
+    this.overlay?.querySelector('#v360-loading')?.classList.add('v360-hidden')
   }
 
   private _hideHintAfterDelay(): void {
     setTimeout(() => {
-      this.overlay?.querySelector('#v360-hint')?.classList.add('hidden')
+      this.overlay?.querySelector('#v360-hint')?.classList.add('v360-hidden')
     }, 3500)
   }
 
@@ -359,35 +321,28 @@ export class Viewer360 {
   // ── Three.js ──────────────────────────────────────────────────────────────
 
   private _initRenderer(): void {
-    const {THREE} = this
-    const canvas  = document.getElementById('v360-canvas') as HTMLCanvasElement
+    const { THREE } = this
+    const canvas    = document.getElementById('v360-canvas') as HTMLCanvasElement
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
     this.renderer.setSize(window.innerWidth, window.innerHeight)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 
     this.scene  = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(
-      75,
-      window.innerWidth / window.innerHeight,
-      0.1,
-      1000,
-    )
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
 
     this.texLoader = new THREE.TextureLoader()
 
-    // Pre-allocate helpers
-    this._euler = new THREE.Euler()
-    this._q1    = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
+    // Pre-alloc quaternion helpers (Three.js DeviceOrientationControls approach)
+    this._euler   = new THREE.Euler()
+    this._q1      = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
+    this._qOrient = new THREE.Quaternion()
+    this._zee     = new THREE.Vector3(0, 0, 1)
   }
 
   private async _loadImage(name: string): Promise<void> {
-    const {THREE} = this
-    const url     = `${IMAGES_PATH}${name}${IMAGE_EXT}`
-
-    const texture: any = await new Promise((resolve, reject) => {
-      this.texLoader.load(url, resolve, undefined, reject)
-    }).catch(() => null)
+    const { THREE } = this
+    const url       = `${IMAGES_PATH}${name}${IMAGE_EXT}`
 
     if (this.sphere) {
       this.scene.remove(this.sphere)
@@ -397,19 +352,19 @@ export class Viewer360 {
       this.sphere = null
     }
 
-    if (texture) {
-      texture.colorSpace = THREE.SRGBColorSpace ?? THREE.sRGBEncoding
-    }
-
-    const geo = new THREE.SphereGeometry(500, 60, 40)
-    geo.scale(-1, 1, 1)   // normals inward
-
-    const mat = new THREE.MeshBasicMaterial({
-      map:   texture ?? null,
-      color: texture ? 0xffffff : 0x1a2a3a,
+    const texture: any = await new Promise(resolve => {
+      this.texLoader.load(url, resolve, undefined, () => resolve(null))
     })
 
-    this.sphere = new THREE.Mesh(geo, mat)
+    if (texture) texture.colorSpace = THREE.SRGBColorSpace ?? THREE.sRGBEncoding
+
+    const geo = new THREE.SphereGeometry(500, 60, 40)
+    geo.scale(-1, 1, 1)
+
+    this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      map:   texture ?? null,
+      color: texture ? 0xffffff : 0x1a2a3a,
+    }))
     this.scene.add(this.sphere)
   }
 
@@ -420,29 +375,31 @@ export class Viewer360 {
       this.sphere.geometry.dispose()
     }
     this.renderer?.dispose()
-    this.renderer = null
-    this.scene    = null
-    this.camera   = null
-    this.sphere   = null
+    this.renderer = this.scene = this.camera = this.sphere = null
   }
 
   // ── Gyroscope ─────────────────────────────────────────────────────────────
 
-  private async _requestGyroPermission(): Promise<void> {
+  private async _requestGyroPermission(): Promise<boolean> {
     const DOE = (DeviceOrientationEvent as any)
     if (typeof DOE?.requestPermission === 'function') {
       try {
-        await DOE.requestPermission()
-      } catch (_) { /* permission denied — gyro won't work but app won't crash */ }
+        const result = await DOE.requestPermission()
+        if (result !== 'granted') return false
+      } catch {
+        return false
+      }
     }
+    return probeGyroscope(1200)
   }
 
   private _startGyro(): void {
+    this._gyroOk = true
     this._gyroHandler = (e: DeviceOrientationEvent) => {
-      this._alpha     = e.alpha ?? 0
-      this._beta      = e.beta  ?? 90
-      this._gamma     = e.gamma ?? 0
-      this._gyroActive = true
+      if (e.alpha === null) return
+      this._alpha = e.alpha
+      this._beta  = e.beta  ?? 90
+      this._gamma = e.gamma ?? 0
     }
     window.addEventListener('deviceorientation', this._gyroHandler)
   }
@@ -452,27 +409,84 @@ export class Viewer360 {
       window.removeEventListener('deviceorientation', this._gyroHandler)
       this._gyroHandler = null
     }
+    this._gyroOk = false
+  }
+
+  // ── Touch drag fallback ───────────────────────────────────────────────────
+
+  private _startTouchDrag(): void {
+    const drag = this._touchDrag
+
+    this._touchStartHandler = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return
+      drag.active = true
+      drag.lastX  = e.touches[0].clientX
+      drag.lastY  = e.touches[0].clientY
+    }
+
+    this._touchMoveHandler = (e: TouchEvent) => {
+      if (!drag.active || e.touches.length !== 1) return
+      const dx   = e.touches[0].clientX - drag.lastX
+      const dy   = e.touches[0].clientY - drag.lastY
+      drag.lastX = e.touches[0].clientX
+      drag.lastY = e.touches[0].clientY
+      drag.lon  -= dx * 0.25
+      drag.lat  += dy * 0.15
+      drag.lat   = Math.max(-85, Math.min(85, drag.lat))
+    }
+
+    this._touchEndHandler = () => { drag.active = false }
+
+    const canvas = document.getElementById('v360-canvas')!
+    canvas.addEventListener('touchstart', this._touchStartHandler, { passive: true })
+    canvas.addEventListener('touchmove',  this._touchMoveHandler,  { passive: true })
+    canvas.addEventListener('touchend',   this._touchEndHandler,   { passive: true })
+  }
+
+  private _stopTouchDrag(): void {
+    const canvas = document.getElementById('v360-canvas')
+    if (!canvas) return
+    if (this._touchStartHandler) canvas.removeEventListener('touchstart', this._touchStartHandler)
+    if (this._touchMoveHandler)  canvas.removeEventListener('touchmove',  this._touchMoveHandler)
+    if (this._touchEndHandler)   canvas.removeEventListener('touchend',   this._touchEndHandler)
+    this._touchStartHandler = this._touchMoveHandler = this._touchEndHandler = null
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
 
   private _startLoop(): void {
-    const {THREE} = this
+    const { THREE } = this
 
     const tick = () => {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
-      if (this._gyroActive) {
-        // Standard device-orientation → camera quaternion conversion
-        // Matches Three.js DeviceOrientationControls approach
-        const alpha = THREE.MathUtils.degToRad(this._alpha)
-        const beta  = THREE.MathUtils.degToRad(this._beta)
-        const gamma = THREE.MathUtils.degToRad(this._gamma)
+      if (this._gyroOk) {
+        // ── Gyro → camera quaternion ────────────────────────────────────────
+        // Compensate for screen orientation so it works in portrait AND landscape
+        // (fixes the "upside down" issue on iPad in landscape mode)
+        const alpha  = THREE.MathUtils.degToRad(this._alpha)
+        const beta   = THREE.MathUtils.degToRad(this._beta)
+        const gamma  = THREE.MathUtils.degToRad(this._gamma)
+        const orient = THREE.MathUtils.degToRad(
+          window.screen?.orientation?.angle ?? (window as any).orientation ?? 0,
+        )
 
         this._euler.set(beta, alpha, -gamma, 'YXZ')
         this.camera.quaternion.setFromEuler(this._euler)
         this.camera.quaternion.multiply(this._q1)
+        this._qOrient.setFromAxisAngle(this._zee, -orient)
+        this.camera.quaternion.multiply(this._qOrient)
+      } else {
+        // ── Touch drag ──────────────────────────────────────────────────────
+        const { lon, lat } = this._touchDrag
+        const phi   = THREE.MathUtils.degToRad(90 - lat)
+        const theta = THREE.MathUtils.degToRad(lon)
+        this.camera.lookAt(
+          500 * Math.sin(phi) * Math.cos(theta),
+          500 * Math.cos(phi),
+          500 * Math.sin(phi) * Math.sin(theta),
+        )
       }
 
       this.renderer.render(this.scene, this.camera)

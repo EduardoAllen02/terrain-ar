@@ -4,6 +4,7 @@ import {ArUiOverlay}        from './ar-ui-overlay'
 import {BillboardManager}   from './billboard-manager'
 import {ExperienceRegistry} from './experience-registry'
 import {Viewer360}          from './viewer-360'
+import {checkArSupport, checkCameraAccess} from './device-check'
 
 const CAMERA_OFFSET  = 0.6
 const INITIAL_SCALE  = 0.28
@@ -83,29 +84,35 @@ ecs.registerComponent({
     let gestures: GestureHandler | null  = null
     let materialsApplied                 = false
     let viewing360                       = false
+    let boardsReady                      = false
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
     const boards   = new BillboardManager(THREE, {
-      baseSize:       0.3,
+      baseSize:       0.10,
       verticalOffset: 0.025,
       debug:          false,
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
-        // Detach gestures while in 360 so accidental touches don't move model
         gestures?.detach()
         viewer.open(name, registry, () => {
-          // Back from 360 → restore AR gestures
           viewing360 = false
-          gestures?.attach()
+          // ── KEY FIX: re-enter scanning so AR re-detects floor cleanly ───
+          // Hides the model, clears placed, starts new surface detection.
+          // The user sees "Detectando entorno" spinner while SLAM resets.
+          boards.dispose(world.three.scene)
+          boardsReady = false
+          restoreMaterials(matStore)  // safety clear
+          doRescan.trigger()
         })
       },
     })
 
     const doReady  = ecs.defineTrigger()
     const doPlaced = ecs.defineTrigger()
+    const doRescan = ecs.defineTrigger()
 
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
@@ -115,6 +122,13 @@ ecs.registerComponent({
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
+        // Device checks run once here
+        checkArSupport()
+        checkCameraAccess(
+          () => { /* OK — 8thwall takes over camera */ },
+          () => { /* alert already shown by checkCameraAccess */ },
+        )
+
         world.setPosition(schema.terrainEntity, 0, 0, 0)
         ecs.Scale.set(world, schema.terrainEntity, {
           x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
@@ -130,6 +144,9 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
+    // Used both for initial placement AND after returning from 360°.
+    // On re-entry the model is hidden so the user sees clean AR while
+    // SLAM re-settles, then the model snaps to the new surface hit.
 
     ecs.defineState('scanning')
       .onEnter(() => {
@@ -169,6 +186,7 @@ ecs.registerComponent({
       })
 
       .onTrigger(doPlaced, 'placed')
+      .onTrigger(doRescan, 'scanning')   // self-loop: re-enter scanning cleanly
 
     // ── STATE: placed ───────────────────────────────────────────────────────
 
@@ -180,25 +198,27 @@ ecs.registerComponent({
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        const terrainObj = getTerrainObj()
-        if (terrainObj) {
-          const hotspotNames = await boards.init(terrainObj, world.three.scene)
-          registry.register(hotspotNames)
+        if (!boardsReady) {
+          const terrainObj = getTerrainObj()
+          if (terrainObj) {
+            const hotspotNames = await boards.init(terrainObj, world.three.scene)
+            registry.register(hotspotNames)
+            boardsReady = true
+          }
         }
 
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
-        if (viewing360) return   // 360 viewer has its own render loop
+        if (viewing360) return
         const terrainObj = getTerrainObj()
-        if (terrainObj) boards.update(terrainObj)
+        if (terrainObj && boardsReady) boards.update(terrainObj)
       })
 
       .onExit(() => {
         gestures?.detach()
         gestures = null
-        boards.dispose(world.three.scene)
       })
   },
 

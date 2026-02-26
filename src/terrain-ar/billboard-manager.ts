@@ -5,10 +5,6 @@ export interface BillboardOptions {
   onHotspotTap?:   (name: string) => void
 }
 
-// Asset folder per type — structure in repo:
-//   assets/pois/hotspot/NAME.png
-//   assets/pois/mountain/NAME.png
-//   assets/pois/pin/NAME.png
 const ASSET_PATHS = {
   hotspot:  'assets/pois/hotspot/',
   mountain: 'assets/pois/mountain/',
@@ -39,9 +35,9 @@ export class BillboardManager {
   private _scale: any
   private opts:   Required<BillboardOptions>
 
-  private _tapStart:      { x: number; y: number; t: number } | null = null
-  private _tapListener:   ((e: TouchEvent) => void) | null = null
-  private _tapEndListener:((e: TouchEvent) => void) | null = null
+  private _tapStart:       { x: number; y: number; t: number } | null = null
+  private _tapListener:    ((e: TouchEvent) => void) | null = null
+  private _tapEndListener: ((e: TouchEvent) => void) | null = null
 
   constructor(
     private readonly THREE: any,
@@ -55,7 +51,6 @@ export class BillboardManager {
     }
   }
 
-  // Returns names of all discovered hotspot nodes (for ExperienceRegistry)
   async init(terrainObject: any, scene: any): Promise<string[]> {
     const { THREE, opts } = this
     this._v3    = new THREE.Vector3()
@@ -69,9 +64,9 @@ export class BillboardManager {
       const type = this._detectType(node.name)
       if (!type) return
 
-      const prefix  = PREFIXES[type]
-      const name    = node.name.slice(prefix.length)
-      const url     = `${ASSET_PATHS[type]}${name}.png`
+      const prefix = PREFIXES[type]
+      const name   = node.name.slice(prefix.length)
+      const url    = `${ASSET_PATHS[type]}${name}.png`
 
       if (type === 'hotspot') hotspotNames.push(name)
 
@@ -104,7 +99,6 @@ export class BillboardManager {
 
   update(terrainObject: any): void {
     const { opts, _v3, _scale } = this
-
     terrainObject.getWorldScale(_scale)
     const ts = _scale.x
 
@@ -112,7 +106,6 @@ export class BillboardManager {
       anchor.getWorldPosition(_v3)
       _v3.y += opts.verticalOffset * ts
       sprite.position.copy(_v3)
-
       const size  = opts.baseSize * ts
       const ratio = this._getAspect(sprite)
       sprite.scale.set(size * ratio, size, 1)
@@ -133,26 +126,20 @@ export class BillboardManager {
     return this.billboards.find(b => b.name === name)?.sprite
   }
 
-  // ── Tap detection ──────────────────────────────────────────────────────────
-
   private _attachTapListener(): void {
     this._tapListener = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
       this._tapStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() }
     }
-
     this._tapEndListener = (e: TouchEvent) => {
       if (!this._tapStart) return
       const start = this._tapStart
       this._tapStart = null
-
       const t     = e.changedTouches[0]
       const moved = Math.hypot(t.clientX - start.x, t.clientY - start.y)
       if (Date.now() - start.t > TAP_MAX_MS || moved > TAP_MAX_MOVE_PX) return
-
       this._checkHotspotHit(t.clientX, t.clientY)
     }
-
     window.addEventListener('touchstart', this._tapListener,    { passive: true })
     window.addEventListener('touchend',   this._tapEndListener, { passive: true })
   }
@@ -164,9 +151,8 @@ export class BillboardManager {
   }
 
   private _checkHotspotHit(clientX: number, clientY: number): void {
-    const hotspots  = this.billboards.filter(b => b.type === 'hotspot' && b.sprite.visible)
+    const hotspots = this.billboards.filter(b => b.type === 'hotspot' && b.sprite.visible)
     if (!hotspots.length) return
-
     const cam = this._getCamera()
     if (!cam) return
 
@@ -174,7 +160,6 @@ export class BillboardManager {
        (clientX / window.innerWidth)  * 2 - 1,
       -(clientY / window.innerHeight) * 2 + 1,
     )
-
     const threshold = (44 / window.innerWidth) * 2
     let closest: Billboard | null = null
     let closestDist = Infinity
@@ -182,12 +167,8 @@ export class BillboardManager {
     for (const b of hotspots) {
       const ndc  = b.sprite.position.clone().project(cam)
       const dist = tap.distanceTo(new this.THREE.Vector2(ndc.x, ndc.y))
-      if (dist < threshold && dist < closestDist) {
-        closest     = b
-        closestDist = dist
-      }
+      if (dist < threshold && dist < closestDist) { closest = b; closestDist = dist }
     }
-
     if (closest) this.opts.onHotspotTap(closest.name)
   }
 
@@ -198,8 +179,6 @@ export class BillboardManager {
     })
     return cam
   }
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
 
   private _detectType(nodeName: string): PoiType | null {
     for (const [type, prefix] of Object.entries(PREFIXES)) {
@@ -228,7 +207,7 @@ export class BillboardManager {
     }
     const canvas = document.createElement('canvas')
     canvas.width = 256; canvas.height = 64
-    const ctx    = canvas.getContext('2d')!
+    const ctx = canvas.getContext('2d')!
     ctx.fillStyle = colors[type]
     ctx.fillRect(0, 0, 256, 64)
     ctx.fillStyle = '#fff'

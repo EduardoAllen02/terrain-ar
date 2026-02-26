@@ -1,18 +1,6 @@
-/**
- * ExperienceRegistry
- *
- * Se construye en runtime a partir de los nombres de hotspots
- * descubiertos en el GLB. Orden alfabético por defecto.
- *
- * Para añadir una nueva experiencia:
- *   1. Añadir Empty "hotspot_NOMBRE" en Blender
- *   2. Añadir assets/pois/hotspot/NOMBRE.png
- *   3. Añadir assets/360/NOMBRE.jpg
- *   — Sin tocar código.
- */
 export class ExperienceRegistry {
   private names: string[] = []
-  private idx   = 0
+  idx = 0   // internal — accessed by Viewer360 for dot sync
 
   register(hotspotNames: string[]): void {
     this.names = [...hotspotNames].sort()
