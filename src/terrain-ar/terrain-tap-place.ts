@@ -45,6 +45,69 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
+// ── XR8 pause / resume ────────────────────────────────────────────────────────
+//
+// WHY we pause XR8:
+//   8thwall's absolute-scale component writes ECS Scale every tick using:
+//     entityScale = desiredScale × slamScaleFactor
+//   The slamScaleFactor is refined continuously as SLAM accumulates data.
+//   If we leave XR8 running during 360°, SLAM keeps updating and the factor
+//   drifts — causing the model to appear smaller each return cycle.
+//   Pausing XR8 freezes SLAM at the last known good state.
+//
+// WHY there's no white flash:
+//   We show a full-screen black cover BEFORE hiding the AR canvas.
+//   The cover stays visible during XR8.resume() + first SLAM frame.
+//   Only removed once scanning confirms a valid floor raycast hit.
+
+let _arCover: HTMLDivElement | null = null
+
+function showArCover(): void {
+  if (_arCover) return
+  const div = document.createElement('div')
+  div.id = 'ar-transition-cover'
+  div.style.cssText = `
+    position:fixed; inset:0; z-index:88888;
+    background:#000; pointer-events:none;
+    transition:opacity 0.3s ease; opacity:1;
+  `
+  document.body.appendChild(div)
+  _arCover = div
+}
+
+function hideArCover(): void {
+  if (!_arCover) return
+  const el = _arCover
+  _arCover = null
+  el.style.opacity = '0'
+  setTimeout(() => el.remove(), 320)
+}
+
+function findArCanvas(): HTMLCanvasElement | null {
+  // 8thwall renders to the first canvas in the DOM that is NOT ours
+  return (
+    document.querySelector<HTMLCanvasElement>('canvas[id^="XR"]') ??
+    document.querySelector<HTMLCanvasElement>('canvas:not(#v360-canvas)')
+  )
+}
+
+function pauseAr(): void {
+  try { (window as any).XR8?.pause() } catch (_) {}
+  const c = findArCanvas()
+  if (c) c.style.visibility = 'hidden'
+}
+
+function resumeAr(): void {
+  // Canvas stays hidden — hideArCover() reveals the scene once floor is found
+  try { (window as any).XR8?.resume() } catch (_) {}
+}
+
+function revealArCanvas(): void {
+  const c = findArCanvas()
+  if (c) c.style.visibility = ''
+  hideArCover()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 ecs.registerComponent({
@@ -70,8 +133,9 @@ ecs.registerComponent({
 
     let viewing360    = false
     let pendingRescan = false
-    let isRescan      = false   // true on return from 360 or manual reset
+    let isRescan      = false
     let scanFrames    = 0
+    let coverShown    = false   // true when AR cover is up waiting for floor
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -86,9 +150,13 @@ ecs.registerComponent({
         gestures?.detach()
         ui.hideResetButton()
 
-        // 360 overlays on top of AR canvas — no XR8.pause() needed.
-        // Keeping AR running avoids the white-flash on resume.
+        // Show cover FIRST (prevents flash), then pause AR
+        showArCover()
+        pauseAr()
+
         viewer.open(name, registry, () => {
+          // 360 closed — resume AR under the cover, rescan will reveal canvas
+          resumeAr()
           viewing360    = false
           pendingRescan = true
         })
@@ -128,19 +196,16 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
-    // During rescan: model stays fully hidden while waiting RESCAN_MIN_FRAMES.
-    // No grey preview — ui.showRescanLoader() covers the background instead.
 
     ecs.defineState('scanning')
       .onEnter(() => {
         hideModel()
-        restoreMaterials(matStore)   // safety: clear any leftover preview material
-        scanFrames = 0
+        restoreMaterials(matStore)
+        scanFrames  = 0
+        coverShown  = isRescan   // track whether we need to remove cover later
         dataAttribute.cursor(eid).placed = false
 
         if (isRescan) {
-          // Show scanning loader to cover the transition — hides the AR background
-          // briefly so user never sees a white flash or naked scene
           ui.showRescanLoader()
         } else {
           ui.hideLoader()
@@ -154,10 +219,9 @@ ecs.registerComponent({
 
         scanFrames++
 
-        // Wait RESCAN_MIN_FRAMES on rescan so SLAM finds new real floor
         if (isRescan && scanFrames < RESCAN_MIN_FRAMES) return
 
-        // Floor confirmed — place model directly with real materials, no preview
+        // Floor confirmed
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
         const {x: px, z: pz} = offsetTowardCamera(
@@ -170,7 +234,13 @@ ecs.registerComponent({
           x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
         })
 
-        ui.hideLoader()   // hides both initial and rescan loaders
+        // Reveal AR canvas (removes black cover) now that we have a valid floor
+        if (coverShown) {
+          revealArCanvas()
+          coverShown = false
+        }
+
+        ui.hideLoader()
         doPlaced.trigger()
       })
 
@@ -194,11 +264,11 @@ ecs.registerComponent({
         }
 
         ui.showResetButton(() => {
-          // Reset: re-scan from scratch, keep 3D asset cached
           gestures?.detach()
           gestures = null
           boards.dispose(world.three.scene)
           restoreMaterials(matStore)
+          showArCover()
           isRescan      = true
           pendingRescan = false
           doRescan.trigger()
