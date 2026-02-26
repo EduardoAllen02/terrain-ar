@@ -60,6 +60,33 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
+// ── Camera feed helpers ───────────────────────────────────────────────────────
+// 8thwall renders the camera passthrough to a <canvas> it injects in the body.
+// Hiding it while in 360 prevents the AR feed from burning battery/GPU in background.
+
+function hideArCamera(): void {
+  const xr8 = (window as any).XR8
+  if (xr8?.pause) {
+    xr8.pause()
+    return
+  }
+  // Fallback: hide 8thwall canvas visually
+  document.querySelectorAll('canvas').forEach((c: HTMLCanvasElement) => {
+    if (c.id !== 'v360-canvas') c.style.visibility = 'hidden'
+  })
+}
+
+function showArCamera(): void {
+  const xr8 = (window as any).XR8
+  if (xr8?.resume) {
+    xr8.resume()
+    return
+  }
+  document.querySelectorAll('canvas').forEach((c: HTMLCanvasElement) => {
+    if (c.id !== 'v360-canvas') c.style.visibility = ''
+  })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 ecs.registerComponent({
@@ -83,29 +110,31 @@ ecs.registerComponent({
     const matStore: MeshEntry[]          = []
     let gestures: GestureHandler | null  = null
     let materialsApplied                 = false
-    let viewing360                       = false
-    let boardsReady                      = false
+
+    // Flags checked in onTick — safe to set from async callbacks outside ECS tick
+    let viewing360    = false
+    let pendingRescan = false   // set by viewer close callback → picked up in onTick
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
     const boards   = new BillboardManager(THREE, {
-      baseSize:       0.4,
+      baseSize:       0.10,
       verticalOffset: 0.025,
       debug:          false,
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
+
+        // Pause gestures and camera feed while in 360
         gestures?.detach()
+        hideArCamera()
+
         viewer.open(name, registry, () => {
-          viewing360 = false
-          // ── KEY FIX: re-enter scanning so AR re-detects floor cleanly ───
-          // Hides the model, clears placed, starts new surface detection.
-          // The user sees "Detectando entorno" spinner while SLAM resets.
-          boards.dispose(world.three.scene)
-          boardsReady = false
-          restoreMaterials(matStore)  // safety clear
-          doRescan.trigger()
+          // ── Called when user taps "Mapa AR" ──
+          showArCamera()
+          viewing360    = false
+          pendingRescan = true   // onTick will pick this up and trigger rescan
         })
       },
     })
@@ -122,12 +151,8 @@ ecs.registerComponent({
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
-        // Device checks run once here
         checkArSupport()
-        checkCameraAccess(
-          () => { /* OK — 8thwall takes over camera */ },
-          () => { /* alert already shown by checkCameraAccess */ },
-        )
+        checkCameraAccess(() => {}, () => {})
 
         world.setPosition(schema.terrainEntity, 0, 0, 0)
         ecs.Scale.set(world, schema.terrainEntity, {
@@ -144,9 +169,6 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
-    // Used both for initial placement AND after returning from 360°.
-    // On re-entry the model is hidden so the user sees clean AR while
-    // SLAM re-settles, then the model snaps to the new surface hit.
 
     ecs.defineState('scanning')
       .onEnter(() => {
@@ -186,7 +208,6 @@ ecs.registerComponent({
       })
 
       .onTrigger(doPlaced, 'placed')
-      .onTrigger(doRescan, 'scanning')   // self-loop: re-enter scanning cleanly
 
     // ── STATE: placed ───────────────────────────────────────────────────────
 
@@ -195,31 +216,44 @@ ecs.registerComponent({
         restoreMaterials(matStore)
         materialsApplied = false
 
+        // Always re-create gestures on enter (covers both first placement and return from 360)
+        gestures?.detach()
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        if (!boardsReady) {
-          const terrainObj = getTerrainObj()
-          if (terrainObj) {
-            const hotspotNames = await boards.init(terrainObj, world.three.scene)
-            registry.register(hotspotNames)
-            boardsReady = true
-          }
+        // Always re-init billboards on enter — disposed when going to 360
+        boards.dispose(world.three.scene)   // safe no-op if already empty
+        const terrainObj = getTerrainObj()
+        if (terrainObj) {
+          const hotspotNames = await boards.init(terrainObj, world.three.scene)
+          registry.register(hotspotNames)
         }
 
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
+        // Pick up pending rescan flag set by viewer close callback
+        if (pendingRescan) {
+          pendingRescan = false
+          doRescan.trigger()
+          return
+        }
+
         if (viewing360) return
+
         const terrainObj = getTerrainObj()
-        if (terrainObj && boardsReady) boards.update(terrainObj)
+        if (terrainObj) boards.update(terrainObj)
       })
 
       .onExit(() => {
         gestures?.detach()
         gestures = null
+        boards.dispose(world.three.scene)
       })
+
+      // Transition back to scanning when viewer closes
+      .onTrigger(doRescan, 'scanning')
   },
 
   remove: () => {},
