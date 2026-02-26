@@ -48,7 +48,7 @@ export class BillboardManager {
     opts: BillboardOptions = {},
   ) {
     this.opts = {
-      baseSize:       opts.baseSize       ?? 0.10,
+      baseSize:       opts.baseSize       ?? 0.8,
       verticalOffset: opts.verticalOffset ?? 0.025,
       debug:          opts.debug          ?? false,
       onHotspotTap:   opts.onHotspotTap   ?? (() => {}),
