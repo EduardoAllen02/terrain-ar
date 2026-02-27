@@ -113,6 +113,41 @@ const injectStyles = (() => {
   }
 })()
 
+// ── Screen orientation angle ──────────────────────────────────────────────────
+//
+// The problem: iPad Pro's natural orientation is LANDSCAPE (angle = 0°).
+// iPhone's natural orientation is PORTRAIT (angle = 0°).
+//
+// DeviceOrientationEvent angles (alpha/beta/gamma) are always relative to
+// the device's natural orientation. So the same physical position gives
+// different beta/gamma values on iPad vs iPhone.
+//
+// Three.js DeviceOrientationControls assumes portrait-natural (phone).
+// On iPad in portrait: screen.orientation.angle = 90°, but the sensor
+// data is already compensated for landscape-natural, so we get double rotation.
+//
+// Fix: detect iPad (landscape-natural) and subtract 90° from the orient angle.
+// This realigns the coordinate system to match phone behavior.
+
+function getOrientAngleDeg(): number {
+  const raw = window.screen?.orientation?.angle
+    ?? (window as any).orientation
+    ?? 0
+
+  // Detect iPad: natural orientation is landscape (screen.width > screen.height
+  // when angle === 0, i.e. in natural/home orientation)
+  const isIPad = /iPad/.test(navigator.userAgent)
+    || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
+
+  if (isIPad) {
+    // iPad natural = landscape = 0°.
+    // We subtract 90° so the math matches the portrait-natural assumption.
+    return raw - 90
+  }
+
+  return raw
+}
+
 // ── Viewer360 ─────────────────────────────────────────────────────────────────
 
 export class Viewer360 {
@@ -124,8 +159,7 @@ export class Viewer360 {
   private texLoader: any = null
   private rafId      = 0
 
-  // Texture cache — keyed by POI name, disposed on full close
-  private texCache  = new Map<string, any>()
+  private texCache = new Map<string, any>()
 
   // Gyro
   private _gyroHandler: ((e: DeviceOrientationEvent) => void) | null = null
@@ -133,10 +167,10 @@ export class Viewer360 {
   private _gyroOk = false
 
   // Three helpers
-  private _euler: any = null
-  private _q1:    any = null
+  private _euler:   any = null
+  private _q1:      any = null
   private _qOrient: any = null
-  private _zee:   any = null
+  private _zee:     any = null
 
   // Touch drag
   private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
@@ -171,14 +205,10 @@ export class Viewer360 {
     cancelAnimationFrame(this.rafId)
     this._stopGyro()
     this._stopTouchDrag()
-
     const el = this.overlay
     if (el) {
       el.classList.remove('v360-visible')
-      setTimeout(() => {
-        el.remove()
-        this._fullDispose()   // dispose renderer + ALL cached textures
-      }, 380)
+      setTimeout(() => { el.remove(); this._fullDispose() }, 380)
     }
     this.overlay = null
     onClose()
@@ -312,7 +342,6 @@ export class Viewer360 {
   private async _loadImage(name: string): Promise<void> {
     const { THREE } = this
 
-    // Dispose current sphere mesh but NOT the texture (cached for nav)
     if (this.sphere) {
       this.scene.remove(this.sphere)
       this.sphere.material.dispose()
@@ -320,7 +349,6 @@ export class Viewer360 {
       this.sphere = null
     }
 
-    // Use cached texture if available, otherwise load
     let texture = this.texCache.get(name) ?? null
     if (!texture) {
       texture = await new Promise(resolve => {
@@ -348,16 +376,13 @@ export class Viewer360 {
   }
 
   private _fullDispose(): void {
-    // Dispose sphere
     if (this.sphere) {
       this.sphere.geometry.dispose()
       this.sphere.material.dispose()
       this.sphere = null
     }
-    // Dispose ALL cached textures
     this.texCache.forEach(tex => tex.dispose())
     this.texCache.clear()
-    // Dispose renderer
     this.renderer?.dispose()
     this.renderer = this.scene = this.camera = null
   }
@@ -400,14 +425,17 @@ export class Viewer360 {
     const d = this._drag
     this._onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
-      d.active = true; d.lastX = e.touches[0].clientX; d.lastY = e.touches[0].clientY
+      d.active = true
+      d.lastX  = e.touches[0].clientX
+      d.lastY  = e.touches[0].clientY
     }
     this._onTouchMove = (e: TouchEvent) => {
       if (!d.active || e.touches.length !== 1) return
       d.lon  -= (e.touches[0].clientX - d.lastX) * 0.25
       d.lat  += (e.touches[0].clientY - d.lastY) * 0.15
       d.lat   = Math.max(-85, Math.min(85, d.lat))
-      d.lastX = e.touches[0].clientX; d.lastY = e.touches[0].clientY
+      d.lastX = e.touches[0].clientX
+      d.lastY = e.touches[0].clientY
     }
     this._onTouchEnd = () => { d.active = false }
 
@@ -430,6 +458,7 @@ export class Viewer360 {
 
   private _startLoop(): void {
     const { THREE } = this
+
     const tick = () => {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
@@ -438,9 +467,8 @@ export class Viewer360 {
         const alpha  = THREE.MathUtils.degToRad(this._alpha)
         const beta   = THREE.MathUtils.degToRad(this._beta)
         const gamma  = THREE.MathUtils.degToRad(this._gamma)
-        const orient = THREE.MathUtils.degToRad(
-          window.screen?.orientation?.angle ?? (window as any).orientation ?? 0,
-        )
+        const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
+
         this._euler.set(beta, alpha, -gamma, 'YXZ')
         this.camera.quaternion.setFromEuler(this._euler)
         this.camera.quaternion.multiply(this._q1)
@@ -458,6 +486,7 @@ export class Viewer360 {
 
       this.renderer.render(this.scene, this.camera)
     }
+
     tick()
   }
 }
