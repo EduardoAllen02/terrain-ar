@@ -11,9 +11,6 @@ const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
-// Frames to wait during rescan before placing — lets SLAM re-settle
-const RESCAN_MIN_FRAMES = 45
-
 type MeshEntry = { mesh: any; original: any }
 
 function restoreMaterials(store: MeshEntry[]): void {
@@ -45,67 +42,65 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ── XR8 pause / resume ────────────────────────────────────────────────────────
+// ── XR8 full restart ──────────────────────────────────────────────────────────
 //
-// WHY we pause XR8:
-//   8thwall's absolute-scale component writes ECS Scale every tick using:
-//     entityScale = desiredScale × slamScaleFactor
-//   The slamScaleFactor is refined continuously as SLAM accumulates data.
-//   If we leave XR8 running during 360°, SLAM keeps updating and the factor
-//   drifts — causing the model to appear smaller each return cycle.
-//   Pausing XR8 freezes SLAM at the last known good state.
+// XR8.stop() tears down the entire pipeline: camera feed, SLAM world map,
+// absolute-scale estimator, all internal state. XR8.run() rebuilds from zero.
+// This is the only API that truly resets the spatial map — pause/resume only
+// freezes frames and leaves all accumulated SLAM data intact.
 //
-// WHY there's no white flash:
-//   We show a full-screen black cover BEFORE hiding the AR canvas.
-//   The cover stays visible during XR8.resume() + first SLAM frame.
-//   Only removed once scanning confirms a valid floor raycast hit.
+// We show a black cover before stop() so the user never sees the naked canvas.
+// After run(), XR8 fires 'reality.imageloading' then 'reality.projectwayspotscanning'
+// before the first valid raycast — we wait for raycasts, not those events,
+// so the ECS scanning state naturally gates on actual floor detection.
 
-let _arCover: HTMLDivElement | null = null
+let _cover: HTMLDivElement | null = null
 
-function showArCover(): void {
-  if (_arCover) return
-  const div = document.createElement('div')
-  div.id = 'ar-transition-cover'
-  div.style.cssText = `
-    position:fixed; inset:0; z-index:88888;
-    background:#000; pointer-events:none;
-    transition:opacity 0.3s ease; opacity:1;
-  `
-  document.body.appendChild(div)
-  _arCover = div
+function showCover(): Promise<void> {
+  return new Promise(resolve => {
+    if (_cover) { resolve(); return }
+    const div = document.createElement('div')
+    div.style.cssText = `
+      position:fixed; inset:0; z-index:88888;
+      background:#000; pointer-events:all;
+      opacity:0; transition:opacity 0.2s ease;
+    `
+    document.body.appendChild(div)
+    _cover = div
+    requestAnimationFrame(() => {
+      div.style.opacity = '1'
+      setTimeout(resolve, 220)   // wait for fade-in before stopping XR8
+    })
+  })
 }
 
-function hideArCover(): void {
-  if (!_arCover) return
-  const el = _arCover
-  _arCover = null
+function hideCover(): void {
+  if (!_cover) return
+  const el = _cover
+  _cover = null
   el.style.opacity = '0'
   setTimeout(() => el.remove(), 320)
 }
 
-function findArCanvas(): HTMLCanvasElement | null {
-  // 8thwall renders to the first canvas in the DOM that is NOT ours
+async function restartXR8(canvas: HTMLCanvasElement): Promise<void> {
+  const XR8 = (window as any).XR8
+  if (!XR8) return
+
+  // Full stop — kills camera, SLAM, absolute-scale, everything
+  XR8.stop()
+
+  // Brief delay so the browser camera track is fully released
+  await new Promise(r => setTimeout(r, 350))
+
+  // Restart with same canvas — identical to what happens on page load
+  XR8.run({ canvas })
+}
+
+function getXr8Canvas(): HTMLCanvasElement | null {
   return (
     document.querySelector<HTMLCanvasElement>('canvas[id^="XR"]') ??
     document.querySelector<HTMLCanvasElement>('canvas:not(#v360-canvas)')
   )
-}
-
-function pauseAr(): void {
-  try { (window as any).XR8?.pause() } catch (_) {}
-  const c = findArCanvas()
-  if (c) c.style.visibility = 'hidden'
-}
-
-function resumeAr(): void {
-  // Canvas stays hidden — hideArCover() reveals the scene once floor is found
-  try { (window as any).XR8?.resume() } catch (_) {}
-}
-
-function revealArCanvas(): void {
-  const c = findArCanvas()
-  if (c) c.style.visibility = ''
-  hideArCover()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,10 +127,8 @@ ecs.registerComponent({
     let gestures: GestureHandler | null = null
 
     let viewing360    = false
-    let pendingRescan = false
-    let isRescan      = false
-    let scanFrames    = 0
-    let coverShown    = false   // true when AR cover is up waiting for floor
+    let pendingRescan = false   // picked up by placed.onTick → triggers rescan
+    let coverVisible  = false   // true while black cover is up
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -150,13 +143,8 @@ ecs.registerComponent({
         gestures?.detach()
         ui.hideResetButton()
 
-        // Show cover FIRST (prevents flash), then pause AR
-        showArCover()
-        pauseAr()
-
         viewer.open(name, registry, () => {
-          // 360 closed — resume AR under the cover, rescan will reveal canvas
-          resumeAr()
+          // User pressed "Mapa AR" — full XR8 restart before going back
           viewing360    = false
           pendingRescan = true
         })
@@ -175,6 +163,29 @@ ecs.registerComponent({
       ecs.Scale.set(world, schema.terrainEntity, {
         x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
       })
+    }
+
+    // Shared cleanup called before every rescan (360 return OR manual reset)
+    const cleanAndRestart = async () => {
+      gestures?.detach()
+      gestures = null
+      boards.dispose(world.three.scene)
+      restoreMaterials(matStore)
+      hideModel()
+
+      coverVisible = true
+      await showCover()
+
+      const canvas = getXr8Canvas()
+      if (canvas) await restartXR8(canvas)
+
+      // Signal ECS tick to transition to scanning
+      pendingRescan = true
+    }
+
+    const doReset = () => {
+      // Called by reset button — same full restart
+      cleanAndRestart()
     }
 
     // ── STATE: loading ──────────────────────────────────────────────────────
@@ -201,15 +212,10 @@ ecs.registerComponent({
       .onEnter(() => {
         hideModel()
         restoreMaterials(matStore)
-        scanFrames  = 0
-        coverShown  = isRescan   // track whether we need to remove cover later
         dataAttribute.cursor(eid).placed = false
-
-        if (isRescan) {
-          ui.showRescanLoader()
-        } else {
-          ui.hideLoader()
-        }
+        // Loader already shown by cleanAndRestart / initial loading
+        // Just ensure it's visible (no-op if already showing)
+        ui.showRescanLoader()
       })
 
       .onTick(() => {
@@ -217,11 +223,7 @@ ecs.registerComponent({
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         if (groundHits.length === 0) return
 
-        scanFrames++
-
-        if (isRescan && scanFrames < RESCAN_MIN_FRAMES) return
-
-        // Floor confirmed
+        // Valid floor detected — position model
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
         const {x: px, z: pz} = offsetTowardCamera(
@@ -234,13 +236,13 @@ ecs.registerComponent({
           x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
         })
 
-        // Reveal AR canvas (removes black cover) now that we have a valid floor
-        if (coverShown) {
-          revealArCanvas()
-          coverShown = false
+        // Remove cover and loader only after floor is confirmed
+        if (coverVisible) {
+          hideCover()
+          coverVisible = false
         }
-
         ui.hideLoader()
+
         doPlaced.trigger()
       })
 
@@ -250,8 +252,6 @@ ecs.registerComponent({
 
     ecs.defineState('placed')
       .onEnter(async () => {
-        isRescan = false
-
         gestures?.detach()
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
@@ -263,24 +263,14 @@ ecs.registerComponent({
           registry.register(hotspotNames)
         }
 
-        ui.showResetButton(() => {
-          gestures?.detach()
-          gestures = null
-          boards.dispose(world.three.scene)
-          restoreMaterials(matStore)
-          showArCover()
-          isRescan      = true
-          pendingRescan = false
-          doRescan.trigger()
-        })
-
+        ui.showResetButton(doReset)
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
+        // Pending rescan: triggered by 360 close or reset button
         if (pendingRescan) {
           pendingRescan = false
-          isRescan      = true
           doRescan.trigger()
           return
         }
