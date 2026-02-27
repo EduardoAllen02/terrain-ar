@@ -10,9 +10,6 @@ const CAMERA_OFFSET  = 0.6
 const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
-
-// Frames of valid raycasts to accumulate before placing on rescan.
-// Gives SLAM a moment to re-observe the new floor position.
 const RESCAN_SETTLE_FRAMES = 30
 
 type MeshEntry = { mesh: any; original: any }
@@ -46,7 +43,7 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ── Black cover ───────────────────────────────────────────────────────────────
+// ── Cover negro ───────────────────────────────────────────────────────────────
 
 let _cover: HTMLDivElement | null = null
 
@@ -76,26 +73,15 @@ function hideCover(): void {
 }
 
 // ── absolute-scale neutralizer ────────────────────────────────────────────────
-//
-// absolute-scale reads the SLAM slamScaleFactor and writes:
-//   ECS Scale = desiredScale × slamScaleFactor
-// every tick, overwriting whatever scale we set.
-// The slamScaleFactor grows as SLAM accumulates data across sessions,
-// making the model appear smaller each rescan.
-//
-// Fix: remove the absolute-scale component from the terrain entity entirely.
-// Our code owns scale from this point on — GestureHandler handles pinch zoom.
 
 function disableAbsoluteScale(world: any, terrainEid: any): void {
   try {
     const ecs_ = (window as any).ecs ?? ecs
-    // Try both possible component names used by 8thwall
-    const names = ['absolute-scale', 'absoluteScale', 'AbsoluteScale']
-    for (const name of names) {
+    for (const name of ['absolute-scale', 'absoluteScale', 'AbsoluteScale']) {
       const comp = ecs_[name] ?? world.components?.[name]
       if (comp?.has?.(world, terrainEid)) {
         comp.remove(world, terrainEid)
-        console.log(`[terrain] Removed ${name} component`)
+        console.log(`[terrain] Removed ${name}`)
         break
       }
     }
@@ -146,14 +132,11 @@ ecs.registerComponent({
         viewing360 = true
         gestures?.detach()
         ui.hideResetButton()
-
-        // Cover before opening viewer so transition is clean
         showCover().then(() => {
           viewer.open(name, registry, () => {
             viewing360    = false
             pendingRescan = true
           })
-          // Show 360 overlay — cover will be removed when floor is re-detected
         })
       },
     })
@@ -165,8 +148,20 @@ ecs.registerComponent({
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
 
-    const hideModel = () => {
+    // ── Full entity reset ─────────────────────────────────────────────────
+    // Resets position, rotation (identity quaternion) and scale.
+    // Critical: without resetting rotation the terrain keeps the accumulated
+    // rotation from GestureHandler and the new GestureHandler instance
+    // inherits a world space that is misaligned with the current camera.
+
+    const resetEntityTransform = () => {
+      // Position: far away so it's invisible
       world.setPosition(schema.terrainEntity, 0, -9999, 0)
+
+      // Rotation: identity — wipes all accumulated gesture rotations
+      world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
+
+      // Scale: near-zero
       ecs.Scale.set(world, schema.terrainEntity, {
         x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
       })
@@ -174,17 +169,18 @@ ecs.registerComponent({
 
     const placeModel = (px: number, py: number, pz: number) => {
       world.setPosition(schema.terrainEntity, px, py, pz)
-      // Always set scale directly — absolute-scale must be disabled first
       ecs.Scale.set(world, schema.terrainEntity, {
         x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
       })
+      // Rotation stays identity from resetEntityTransform —
+      // model always faces the same direction on first placement
     }
 
     const startRescan = async () => {
       gestures?.detach(); gestures = null
       boards.dispose(world.three.scene)
       restoreMaterials(matStore)
-      hideModel()
+      resetEntityTransform()   // ← wipes rotation here
       isRescan      = true
       coverVisible  = true
       settleFrames  = 0
@@ -201,7 +197,7 @@ ecs.registerComponent({
         checkArSupport()
         checkCameraAccess(() => {}, () => {})
         isRescan = false
-        hideModel()
+        resetEntityTransform()
         if (ecs.Hidden.has(world, schema.terrainEntity)) {
           ecs.Hidden.remove(world, schema.terrainEntity)
         }
@@ -209,7 +205,6 @@ ecs.registerComponent({
       })
       .onTick(() => {
         if (isModelReady(world, schema.terrainEntity)) {
-          // Disable absolute-scale once, here, before first placement
           if (!absoluteScaleDisabled) {
             disableAbsoluteScale(world, schema.terrainEntity)
             absoluteScaleDisabled = true
@@ -223,12 +218,11 @@ ecs.registerComponent({
 
     ecs.defineState('scanning')
       .onEnter(() => {
-        hideModel()
+        resetEntityTransform()   // ensure clean state even if entered multiple times
         restoreMaterials(matStore)
         settleFrames = 0
         dataAttribute.cursor(eid).placed = false
         if (!isRescan) ui.hideLoader()
-        // On rescan: cover is already up, no other UI needed
       })
 
       .onTick(() => {
@@ -237,7 +231,6 @@ ecs.registerComponent({
         if (groundHits.length === 0) return
 
         settleFrames++
-        // On rescan: wait RESCAN_SETTLE_FRAMES of consistent hits before placing
         if (isRescan && settleFrames < RESCAN_SETTLE_FRAMES) return
 
         const hit    = groundHits[0].point
