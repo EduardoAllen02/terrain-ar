@@ -42,17 +42,7 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ── XR8 full restart ──────────────────────────────────────────────────────────
-//
-// XR8.stop() tears down the entire pipeline: camera feed, SLAM world map,
-// absolute-scale estimator, all internal state. XR8.run() rebuilds from zero.
-// This is the only API that truly resets the spatial map — pause/resume only
-// freezes frames and leaves all accumulated SLAM data intact.
-//
-// We show a black cover before stop() so the user never sees the naked canvas.
-// After run(), XR8 fires 'reality.imageloading' then 'reality.projectwayspotscanning'
-// before the first valid raycast — we wait for raycasts, not those events,
-// so the ECS scanning state naturally gates on actual floor detection.
+// ── Cover negro ───────────────────────────────────────────────────────────────
 
 let _cover: HTMLDivElement | null = null
 
@@ -61,46 +51,47 @@ function showCover(): Promise<void> {
     if (_cover) { resolve(); return }
     const div = document.createElement('div')
     div.style.cssText = `
-      position:fixed; inset:0; z-index:88888;
-      background:#000; pointer-events:all;
-      opacity:0; transition:opacity 0.2s ease;
+      position:fixed;inset:0;z-index:88888;
+      background:#000;pointer-events:all;
+      opacity:0;transition:opacity 0.2s ease;
     `
     document.body.appendChild(div)
     _cover = div
     requestAnimationFrame(() => {
       div.style.opacity = '1'
-      setTimeout(resolve, 220)   // wait for fade-in before stopping XR8
+      setTimeout(resolve, 220)
     })
   })
 }
 
 function hideCover(): void {
   if (!_cover) return
-  const el = _cover
-  _cover = null
+  const el = _cover; _cover = null
   el.style.opacity = '0'
   setTimeout(() => el.remove(), 320)
 }
 
-async function restartXR8(canvas: HTMLCanvasElement): Promise<void> {
-  const XR8 = (window as any).XR8
-  if (!XR8) return
-
-  // Full stop — kills camera, SLAM, absolute-scale, everything
-  XR8.stop()
-
-  // Brief delay so the browser camera track is fully released
-  await new Promise(r => setTimeout(r, 350))
-
-  // Restart with same canvas — identical to what happens on page load
-  XR8.run({ canvas })
-}
+// ── XR8 restart ───────────────────────────────────────────────────────────────
+// XR8.stop() destruye el pipeline completo: cámara, mapa SLAM, absolute-scale.
+// XR8.run() lo reconstruye desde cero — idéntico al primer load de la página.
+// Solo se llama en rescan/reset, NUNCA en el primer arranque.
 
 function getXr8Canvas(): HTMLCanvasElement | null {
   return (
     document.querySelector<HTMLCanvasElement>('canvas[id^="XR"]') ??
     document.querySelector<HTMLCanvasElement>('canvas:not(#v360-canvas)')
   )
+}
+
+async function restartXR8(): Promise<void> {
+  const XR8 = (window as any).XR8
+  if (!XR8) return
+
+  XR8.stop()
+  await new Promise(r => setTimeout(r, 400))   // espera a que el browser libere la cámara
+
+  const canvas = getXr8Canvas()
+  if (canvas) XR8.run({ canvas })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,8 +118,9 @@ ecs.registerComponent({
     let gestures: GestureHandler | null = null
 
     let viewing360    = false
-    let pendingRescan = false   // picked up by placed.onTick → triggers rescan
-    let coverVisible  = false   // true while black cover is up
+    let pendingRescan = false   // flag leído en placed.onTick
+    let isRescan      = false   // true en rescan/reset, false en primer scan
+    let coverVisible  = false
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -142,9 +134,7 @@ ecs.registerComponent({
         viewing360 = true
         gestures?.detach()
         ui.hideResetButton()
-
         viewer.open(name, registry, () => {
-          // User pressed "Mapa AR" — full XR8 restart before going back
           viewing360    = false
           pendingRescan = true
         })
@@ -165,36 +155,30 @@ ecs.registerComponent({
       })
     }
 
-    // Shared cleanup called before every rescan (360 return OR manual reset)
-    const cleanAndRestart = async () => {
-      gestures?.detach()
-      gestures = null
+    // Limpieza completa + restart XR8 — solo para rescan/reset
+    const doFullRescan = async () => {
+      gestures?.detach(); gestures = null
       boards.dispose(world.three.scene)
       restoreMaterials(matStore)
       hideModel()
 
       coverVisible = true
       await showCover()
+      await restartXR8()
 
-      const canvas = getXr8Canvas()
-      if (canvas) await restartXR8(canvas)
-
-      // Signal ECS tick to transition to scanning
-      pendingRescan = true
-    }
-
-    const doReset = () => {
-      // Called by reset button — same full restart
-      cleanAndRestart()
+      isRescan      = true
+      pendingRescan = true   // onTick de placed lo detecta y dispara doRescan
     }
 
     // ── STATE: loading ──────────────────────────────────────────────────────
+    // Solo en el primer arranque — XR8 ya está corriendo, no lo tocamos.
 
     ecs.defineState('loading')
       .initial()
       .onEnter(() => {
         checkArSupport()
         checkCameraAccess(() => {}, () => {})
+        isRescan = false
         hideModel()
         if (ecs.Hidden.has(world, schema.terrainEntity)) {
           ecs.Hidden.remove(world, schema.terrainEntity)
@@ -207,15 +191,21 @@ ecs.registerComponent({
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
+    // En primer scan: la cámara ya está activa, solo esperamos raycast.
+    // En rescan: XR8 ya fue reiniciado, cover negro está encima, esperamos
+    // el primer raycast válido para quitar el cover y mostrar el modelo.
 
     ecs.defineState('scanning')
       .onEnter(() => {
         hideModel()
         restoreMaterials(matStore)
         dataAttribute.cursor(eid).placed = false
-        // Loader already shown by cleanAndRestart / initial loading
-        // Just ensure it's visible (no-op if already showing)
-        ui.showRescanLoader()
+
+        if (!isRescan) {
+          // Primer scan: ocultar el loader inicial, cámara ya visible
+          ui.hideLoader()
+        }
+        // En rescan el cover negro ya está encima — no se muestra nada más
       })
 
       .onTick(() => {
@@ -223,7 +213,7 @@ ecs.registerComponent({
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         if (groundHits.length === 0) return
 
-        // Valid floor detected — position model
+        // Piso detectado — posicionar el modelo
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
         const {x: px, z: pz} = offsetTowardCamera(
@@ -236,12 +226,11 @@ ecs.registerComponent({
           x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
         })
 
-        // Remove cover and loader only after floor is confirmed
+        // Quitar cover negro ahora que tenemos piso real
         if (coverVisible) {
           hideCover()
           coverVisible = false
         }
-        ui.hideLoader()
 
         doPlaced.trigger()
       })
@@ -252,6 +241,8 @@ ecs.registerComponent({
 
     ecs.defineState('placed')
       .onEnter(async () => {
+        isRescan = false
+
         gestures?.detach()
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
@@ -263,27 +254,23 @@ ecs.registerComponent({
           registry.register(hotspotNames)
         }
 
-        ui.showResetButton(doReset)
+        ui.showResetButton(() => doFullRescan())
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
-        // Pending rescan: triggered by 360 close or reset button
         if (pendingRescan) {
           pendingRescan = false
           doRescan.trigger()
           return
         }
-
         if (viewing360) return
-
         const terrainObj = getTerrainObj()
         if (terrainObj) boards.update(terrainObj)
       })
 
       .onExit(() => {
-        gestures?.detach()
-        gestures = null
+        gestures?.detach(); gestures = null
         boards.dispose(world.three.scene)
         ui.hideResetButton()
       })
