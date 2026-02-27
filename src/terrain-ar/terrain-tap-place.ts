@@ -48,7 +48,6 @@ function disableAbsoluteScale(world: any, terrainEid: any): void {
   } catch (_) {}
 }
 
-// Fades to black then reloads — assets already cached so reload is fast.
 function seamlessReload(): void {
   const div = document.createElement('div')
   div.style.cssText = `
@@ -99,6 +98,8 @@ ecs.registerComponent({
         viewing360 = true
         gestures?.detach()
         ui.hideResetButton()
+        ui.hideFullscreenButton()
+        ui.hideGestureHint()
         viewer.open(name, registry, () => seamlessReload())
       },
     })
@@ -187,6 +188,11 @@ ecs.registerComponent({
         }
 
         ui.showResetButton(() => seamlessReload())
+        ui.showFullscreenButton()
+
+        // Gesture hint: shown once per session, fades after 5s or on first touch
+        ui.showGestureHint()
+
         dataAttribute.cursor(eid).placed = true
       })
       .onTick(() => {
@@ -199,6 +205,8 @@ ecs.registerComponent({
         gestures = null
         boards.dispose(world.three.scene)
         ui.hideResetButton()
+        ui.hideFullscreenButton()
+        ui.hideGestureHint()
       })
   },
 
