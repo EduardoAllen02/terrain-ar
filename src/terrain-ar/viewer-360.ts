@@ -4,8 +4,6 @@ import {probeGyroscope}     from './device-check'
 const IMAGES_PATH = 'assets/360/'
 const IMAGE_EXT   = '.jpg'
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-
 const injectStyles = (() => {
   let done = false
   return () => {
@@ -113,42 +111,16 @@ const injectStyles = (() => {
   }
 })()
 
-// ── Screen orientation angle ──────────────────────────────────────────────────
-//
-// The problem: iPad Pro's natural orientation is LANDSCAPE (angle = 0°).
-// iPhone's natural orientation is PORTRAIT (angle = 0°).
-//
-// DeviceOrientationEvent angles (alpha/beta/gamma) are always relative to
-// the device's natural orientation. So the same physical position gives
-// different beta/gamma values on iPad vs iPhone.
-//
-// Three.js DeviceOrientationControls assumes portrait-natural (phone).
-// On iPad in portrait: screen.orientation.angle = 90°, but the sensor
-// data is already compensated for landscape-natural, so we get double rotation.
-//
-// Fix: detect iPad (landscape-natural) and subtract 90° from the orient angle.
-// This realigns the coordinate system to match phone behavior.
-
 function getOrientAngleDeg(): number {
   const raw = window.screen?.orientation?.angle
     ?? (window as any).orientation
     ?? 0
 
-  // Detect iPad: natural orientation is landscape (screen.width > screen.height
-  // when angle === 0, i.e. in natural/home orientation)
   const isIPad = /iPad/.test(navigator.userAgent)
     || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
 
-  if (isIPad) {
-    // iPad natural = landscape = 0°.
-    // We subtract 90° so the math matches the portrait-natural assumption.
-    return raw - 90
-  }
-
-  return raw
+  return isIPad ? raw - 90 : raw
 }
-
-// ── Viewer360 ─────────────────────────────────────────────────────────────────
 
 export class Viewer360 {
   private overlay:   HTMLElement | null = null
@@ -161,26 +133,22 @@ export class Viewer360 {
 
   private texCache = new Map<string, any>()
 
-  // Gyro
-  private _gyroHandler: ((e: DeviceOrientationEvent) => void) | null = null
+  private _gyroHandler:   ((e: DeviceOrientationEvent) => void) | null = null
+  private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
   private _gyroOk = false
 
-  // Three helpers
   private _euler:   any = null
   private _q1:      any = null
   private _qOrient: any = null
   private _zee:     any = null
 
-  // Touch drag
   private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
   private _onTouchEnd:   (() => void)              | null = null
 
   constructor(private readonly THREE: any) {}
-
-  // ── Public ────────────────────────────────────────────────────────────────
 
   async open(
     name:     string,
@@ -193,6 +161,7 @@ export class Viewer360 {
     const gyroOk = await this._requestGyroPermission()
     this._buildOverlay(name, registry, gyroOk, onClose)
     this._initRenderer()
+    this._startResizeHandler()   // ← must be after _initRenderer
     if (gyroOk) this._startGyro()
     else         this._startTouchDrag()
     this._startLoop()
@@ -205,6 +174,7 @@ export class Viewer360 {
     cancelAnimationFrame(this.rafId)
     this._stopGyro()
     this._stopTouchDrag()
+    this._stopResizeHandler()
     const el = this.overlay
     if (el) {
       el.classList.remove('v360-visible')
@@ -325,18 +295,43 @@ export class Viewer360 {
     const canvas    = document.getElementById('v360-canvas') as HTMLCanvasElement
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+    this.renderer.setSize(window.innerWidth, window.innerHeight)
 
     this.scene  = new THREE.Scene()
     this.camera = new THREE.PerspectiveCamera(
       75, window.innerWidth / window.innerHeight, 0.1, 1000,
     )
+
     this.texLoader = new THREE.TextureLoader()
-    this._euler   = new THREE.Euler()
-    this._q1      = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
-    this._qOrient = new THREE.Quaternion()
-    this._zee     = new THREE.Vector3(0, 0, 1)
+    this._euler    = new THREE.Euler()
+    this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
+    this._qOrient  = new THREE.Quaternion()
+    this._zee      = new THREE.Vector3(0, 0, 1)
+  }
+
+  // ── Resize handler ────────────────────────────────────────────────────────
+  // When the user rotates the device, window.innerWidth/Height swap.
+  // We must update both the renderer size and the camera aspect ratio,
+  // otherwise the canvas stays at the old dimensions and the rest is black.
+
+  private _startResizeHandler(): void {
+    this._resizeHandler = () => {
+      if (!this.renderer || !this.camera) return
+      const w = window.innerWidth
+      const h = window.innerHeight
+      this.renderer.setSize(w, h)
+      this.camera.aspect = w / h
+      this.camera.updateProjectionMatrix()
+    }
+    window.addEventListener('resize', this._resizeHandler)
+  }
+
+  private _stopResizeHandler(): void {
+    if (this._resizeHandler) {
+      window.removeEventListener('resize', this._resizeHandler)
+      this._resizeHandler = null
+    }
   }
 
   private async _loadImage(name: string): Promise<void> {
