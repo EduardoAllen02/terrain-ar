@@ -11,6 +11,10 @@ const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
+// Frames of valid raycasts to accumulate before placing on rescan.
+// Gives SLAM a moment to re-observe the new floor position.
+const RESCAN_SETTLE_FRAMES = 30
+
 type MeshEntry = { mesh: any; original: any }
 
 function restoreMaterials(store: MeshEntry[]): void {
@@ -42,7 +46,7 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ── Cover negro ───────────────────────────────────────────────────────────────
+// ── Black cover ───────────────────────────────────────────────────────────────
 
 let _cover: HTMLDivElement | null = null
 
@@ -59,7 +63,7 @@ function showCover(): Promise<void> {
     _cover = div
     requestAnimationFrame(() => {
       div.style.opacity = '1'
-      setTimeout(resolve, 220)
+      setTimeout(resolve, 230)
     })
   })
 }
@@ -71,27 +75,33 @@ function hideCover(): void {
   setTimeout(() => el.remove(), 320)
 }
 
-// ── XR8 restart ───────────────────────────────────────────────────────────────
-// XR8.stop() destruye el pipeline completo: cámara, mapa SLAM, absolute-scale.
-// XR8.run() lo reconstruye desde cero — idéntico al primer load de la página.
-// Solo se llama en rescan/reset, NUNCA en el primer arranque.
+// ── absolute-scale neutralizer ────────────────────────────────────────────────
+//
+// absolute-scale reads the SLAM slamScaleFactor and writes:
+//   ECS Scale = desiredScale × slamScaleFactor
+// every tick, overwriting whatever scale we set.
+// The slamScaleFactor grows as SLAM accumulates data across sessions,
+// making the model appear smaller each rescan.
+//
+// Fix: remove the absolute-scale component from the terrain entity entirely.
+// Our code owns scale from this point on — GestureHandler handles pinch zoom.
 
-function getXr8Canvas(): HTMLCanvasElement | null {
-  return (
-    document.querySelector<HTMLCanvasElement>('canvas[id^="XR"]') ??
-    document.querySelector<HTMLCanvasElement>('canvas:not(#v360-canvas)')
-  )
-}
-
-async function restartXR8(): Promise<void> {
-  const XR8 = (window as any).XR8
-  if (!XR8) return
-
-  XR8.stop()
-  await new Promise(r => setTimeout(r, 400))   // espera a que el browser libere la cámara
-
-  const canvas = getXr8Canvas()
-  if (canvas) XR8.run({ canvas })
+function disableAbsoluteScale(world: any, terrainEid: any): void {
+  try {
+    const ecs_ = (window as any).ecs ?? ecs
+    // Try both possible component names used by 8thwall
+    const names = ['absolute-scale', 'absoluteScale', 'AbsoluteScale']
+    for (const name of names) {
+      const comp = ecs_[name] ?? world.components?.[name]
+      if (comp?.has?.(world, terrainEid)) {
+        comp.remove(world, terrainEid)
+        console.log(`[terrain] Removed ${name} component`)
+        break
+      }
+    }
+  } catch (e) {
+    console.warn('[terrain] Could not remove absolute-scale:', e)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,11 +126,13 @@ ecs.registerComponent({
 
     const matStore: MeshEntry[]         = []
     let gestures: GestureHandler | null = null
+    let absoluteScaleDisabled           = false
 
     let viewing360    = false
-    let pendingRescan = false   // flag leído en placed.onTick
-    let isRescan      = false   // true en rescan/reset, false en primer scan
+    let pendingRescan = false
+    let isRescan      = false
     let coverVisible  = false
+    let settleFrames  = 0
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -134,9 +146,14 @@ ecs.registerComponent({
         viewing360 = true
         gestures?.detach()
         ui.hideResetButton()
-        viewer.open(name, registry, () => {
-          viewing360    = false
-          pendingRescan = true
+
+        // Cover before opening viewer so transition is clean
+        showCover().then(() => {
+          viewer.open(name, registry, () => {
+            viewing360    = false
+            pendingRescan = true
+          })
+          // Show 360 overlay — cover will be removed when floor is re-detected
         })
       },
     })
@@ -155,23 +172,28 @@ ecs.registerComponent({
       })
     }
 
-    // Limpieza completa + restart XR8 — solo para rescan/reset
-    const doFullRescan = async () => {
+    const placeModel = (px: number, py: number, pz: number) => {
+      world.setPosition(schema.terrainEntity, px, py, pz)
+      // Always set scale directly — absolute-scale must be disabled first
+      ecs.Scale.set(world, schema.terrainEntity, {
+        x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
+      })
+    }
+
+    const startRescan = async () => {
       gestures?.detach(); gestures = null
       boards.dispose(world.three.scene)
       restoreMaterials(matStore)
       hideModel()
-
-      coverVisible = true
-      await showCover()
-      await restartXR8()
-
       isRescan      = true
-      pendingRescan = true   // onTick de placed lo detecta y dispara doRescan
+      coverVisible  = true
+      settleFrames  = 0
+      pendingRescan = false
+      await showCover()
+      doRescan.trigger()
     }
 
     // ── STATE: loading ──────────────────────────────────────────────────────
-    // Solo en el primer arranque — XR8 ya está corriendo, no lo tocamos.
 
     ecs.defineState('loading')
       .initial()
@@ -186,26 +208,27 @@ ecs.registerComponent({
         ui.showLoader()
       })
       .onTick(() => {
-        if (isModelReady(world, schema.terrainEntity)) doReady.trigger()
+        if (isModelReady(world, schema.terrainEntity)) {
+          // Disable absolute-scale once, here, before first placement
+          if (!absoluteScaleDisabled) {
+            disableAbsoluteScale(world, schema.terrainEntity)
+            absoluteScaleDisabled = true
+          }
+          doReady.trigger()
+        }
       })
       .onTrigger(doReady, 'scanning')
 
     // ── STATE: scanning ─────────────────────────────────────────────────────
-    // En primer scan: la cámara ya está activa, solo esperamos raycast.
-    // En rescan: XR8 ya fue reiniciado, cover negro está encima, esperamos
-    // el primer raycast válido para quitar el cover y mostrar el modelo.
 
     ecs.defineState('scanning')
       .onEnter(() => {
         hideModel()
         restoreMaterials(matStore)
+        settleFrames = 0
         dataAttribute.cursor(eid).placed = false
-
-        if (!isRescan) {
-          // Primer scan: ocultar el loader inicial, cámara ya visible
-          ui.hideLoader()
-        }
-        // En rescan el cover negro ya está encima — no se muestra nada más
+        if (!isRescan) ui.hideLoader()
+        // On rescan: cover is already up, no other UI needed
       })
 
       .onTick(() => {
@@ -213,7 +236,10 @@ ecs.registerComponent({
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         if (groundHits.length === 0) return
 
-        // Piso detectado — posicionar el modelo
+        settleFrames++
+        // On rescan: wait RESCAN_SETTLE_FRAMES of consistent hits before placing
+        if (isRescan && settleFrames < RESCAN_SETTLE_FRAMES) return
+
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
         const {x: px, z: pz} = offsetTowardCamera(
@@ -221,16 +247,9 @@ ecs.registerComponent({
         )
         const py = hit.y + Y_ABOVE_GROUND
 
-        world.setPosition(schema.terrainEntity, px, py, pz)
-        ecs.Scale.set(world, schema.terrainEntity, {
-          x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
-        })
+        placeModel(px, py, pz)
 
-        // Quitar cover negro ahora que tenemos piso real
-        if (coverVisible) {
-          hideCover()
-          coverVisible = false
-        }
+        if (coverVisible) { hideCover(); coverVisible = false }
 
         doPlaced.trigger()
       })
@@ -254,14 +273,13 @@ ecs.registerComponent({
           registry.register(hotspotNames)
         }
 
-        ui.showResetButton(() => doFullRescan())
+        ui.showResetButton(() => startRescan())
         dataAttribute.cursor(eid).placed = true
       })
 
       .onTick(() => {
         if (pendingRescan) {
-          pendingRescan = false
-          doRescan.trigger()
+          startRescan()
           return
         }
         if (viewing360) return
