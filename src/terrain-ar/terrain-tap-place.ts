@@ -10,9 +10,27 @@ const CAMERA_OFFSET  = 0.6
 const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
-const RESCAN_SETTLE_FRAMES = 30
+const SETTLE_FRAMES  = 20   // frames válidos antes de confirmar posición post-reset
 
 type MeshEntry = { mesh: any; original: any }
+
+function captureAndGrey(THREE: any, obj: any, store: MeshEntry[]): void {
+  store.length = 0
+  const greyMat = new THREE.MeshStandardMaterial({
+    color: 0x8eaec4, roughness: 0.75, metalness: 0.05,
+    transparent: true, opacity: 0.72,
+  })
+  obj.traverse((child: any) => {
+    if (!child.isMesh) return
+    store.push({
+      mesh:     child,
+      original: Array.isArray(child.material) ? child.material.slice() : child.material,
+    })
+    child.material = Array.isArray(child.material)
+      ? child.material.map(() => greyMat)
+      : greyMat
+  })
+}
 
 function restoreMaterials(store: MeshEntry[]): void {
   for (const {mesh, original} of store) mesh.material = original
@@ -43,7 +61,20 @@ function offsetTowardCamera(
   return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
 }
 
-// ── Cover negro ───────────────────────────────────────────────────────────────
+function disableAbsoluteScale(world: any, terrainEid: any): void {
+  try {
+    const ecs_ = (window as any).ecs ?? ecs
+    for (const name of ['absolute-scale', 'absoluteScale', 'AbsoluteScale']) {
+      const comp = ecs_[name] ?? world.components?.[name]
+      if (comp?.has?.(world, terrainEid)) {
+        comp.remove(world, terrainEid)
+        break
+      }
+    }
+  } catch (_) {}
+}
+
+// ── Black cover ───────────────────────────────────────────────────────────────
 
 let _cover: HTMLDivElement | null = null
 
@@ -72,22 +103,31 @@ function hideCover(): void {
   setTimeout(() => el.remove(), 320)
 }
 
-// ── absolute-scale neutralizer ────────────────────────────────────────────────
+// ── XR8 restart ───────────────────────────────────────────────────────────────
+//
+// KEY: capturamos el canvas ANTES de llamar stop().
+// XR8.run({ canvas: mismoCanvas }) reutiliza el elemento DOM existente —
+// no crea uno nuevo, no rompe el z-order, no toca el DOM.
+// El pipeline interno (SLAM, absolute-scale, world coordinates) se destruye
+// y reconstruye desde cero sobre el mismo canvas.
 
-function disableAbsoluteScale(world: any, terrainEid: any): void {
-  try {
-    const ecs_ = (window as any).ecs ?? ecs
-    for (const name of ['absolute-scale', 'absoluteScale', 'AbsoluteScale']) {
-      const comp = ecs_[name] ?? world.components?.[name]
-      if (comp?.has?.(world, terrainEid)) {
-        comp.remove(world, terrainEid)
-        console.log(`[terrain] Removed ${name}`)
-        break
-      }
-    }
-  } catch (e) {
-    console.warn('[terrain] Could not remove absolute-scale:', e)
-  }
+let _xr8Canvas: HTMLCanvasElement | null = null
+
+function captureXr8Canvas(): void {
+  if (_xr8Canvas) return
+  _xr8Canvas = (
+    document.querySelector<HTMLCanvasElement>('canvas[id^="XR"]') ??
+    document.querySelector<HTMLCanvasElement>('canvas:not(#v360-canvas)')
+  )
+}
+
+async function restartXR8(): Promise<void> {
+  const XR8 = (window as any).XR8
+  if (!XR8 || !_xr8Canvas) return
+
+  XR8.stop()
+  await new Promise(r => setTimeout(r, 400))   // browser libera el camera track
+  XR8.run({ canvas: _xr8Canvas })              // mismo canvas — sin tocar DOM
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +159,7 @@ ecs.registerComponent({
     let isRescan      = false
     let coverVisible  = false
     let settleFrames  = 0
+    let materialsApplied = false
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
@@ -132,11 +173,9 @@ ecs.registerComponent({
         viewing360 = true
         gestures?.detach()
         ui.hideResetButton()
-        showCover().then(() => {
-          viewer.open(name, registry, () => {
-            viewing360    = false
-            pendingRescan = true
-          })
+        viewer.open(name, registry, () => {
+          viewing360    = false
+          pendingRescan = true
         })
       },
     })
@@ -148,44 +187,27 @@ ecs.registerComponent({
     const getTerrainObj = (): any =>
       (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
 
-    // ── Full entity reset ─────────────────────────────────────────────────
-    // Resets position, rotation (identity quaternion) and scale.
-    // Critical: without resetting rotation the terrain keeps the accumulated
-    // rotation from GestureHandler and the new GestureHandler instance
-    // inherits a world space that is misaligned with the current camera.
-
-    const resetEntityTransform = () => {
-      // Position: far away so it's invisible
+    const hideModel = () => {
       world.setPosition(schema.terrainEntity, 0, -9999, 0)
-
-      // Rotation: identity — wipes all accumulated gesture rotations
       world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
-
-      // Scale: near-zero
       ecs.Scale.set(world, schema.terrainEntity, {
         x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE,
       })
-    }
-
-    const placeModel = (px: number, py: number, pz: number) => {
-      world.setPosition(schema.terrainEntity, px, py, pz)
-      ecs.Scale.set(world, schema.terrainEntity, {
-        x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
-      })
-      // Rotation stays identity from resetEntityTransform —
-      // model always faces the same direction on first placement
     }
 
     const startRescan = async () => {
       gestures?.detach(); gestures = null
       boards.dispose(world.three.scene)
       restoreMaterials(matStore)
-      resetEntityTransform()   // ← wipes rotation here
-      isRescan      = true
-      coverVisible  = true
-      settleFrames  = 0
-      pendingRescan = false
+      hideModel()
+      materialsApplied = false
+      isRescan         = true
+      coverVisible     = true
+      settleFrames     = 0
+      pendingRescan    = false
+
       await showCover()
+      await restartXR8()   // SLAM y world coords destruidos y reconstruidos
       doRescan.trigger()
     }
 
@@ -197,13 +219,16 @@ ecs.registerComponent({
         checkArSupport()
         checkCameraAccess(() => {}, () => {})
         isRescan = false
-        resetEntityTransform()
+        hideModel()
         if (ecs.Hidden.has(world, schema.terrainEntity)) {
           ecs.Hidden.remove(world, schema.terrainEntity)
         }
         ui.showLoader()
       })
       .onTick(() => {
+        // Captura el canvas de XR8 en el primer tick — ya está en el DOM
+        captureXr8Canvas()
+
         if (isModelReady(world, schema.terrainEntity)) {
           if (!absoluteScaleDisabled) {
             disableAbsoluteScale(world, schema.terrainEntity)
@@ -218,8 +243,9 @@ ecs.registerComponent({
 
     ecs.defineState('scanning')
       .onEnter(() => {
-        resetEntityTransform()   // ensure clean state even if entered multiple times
+        hideModel()
         restoreMaterials(matStore)
+        materialsApplied = false
         settleFrames = 0
         dataAttribute.cursor(eid).placed = false
         if (!isRescan) ui.hideLoader()
@@ -231,7 +257,8 @@ ecs.registerComponent({
         if (groundHits.length === 0) return
 
         settleFrames++
-        if (isRescan && settleFrames < RESCAN_SETTLE_FRAMES) return
+        // Esperar frames estables en rescan para que SLAM fije el nuevo origen
+        if (isRescan && settleFrames < SETTLE_FRAMES) return
 
         const hit    = groundHits[0].point
         const camPos = ecs.Position.get(world, eid)
@@ -240,7 +267,15 @@ ecs.registerComponent({
         )
         const py = hit.y + Y_ABOVE_GROUND
 
-        placeModel(px, py, pz)
+        if (!materialsApplied) {
+          const obj = getTerrainObj()
+          if (obj) { captureAndGrey(THREE, obj, matStore); materialsApplied = true }
+        }
+
+        world.setPosition(schema.terrainEntity, px, py, pz)
+        ecs.Scale.set(world, schema.terrainEntity, {
+          x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE,
+        })
 
         if (coverVisible) { hideCover(); coverVisible = false }
 
