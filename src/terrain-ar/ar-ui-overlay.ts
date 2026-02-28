@@ -5,11 +5,32 @@ const injectStyles = (() => {
     done = true
     const s = document.createElement('style')
     s.textContent = `
+      /* ─────────────────────────────────────────────────────────
+         SHARED TOKENS
+      ───────────────────────────────────────────────────────── */
+      :root {
+        --ar-accent:        #4ab8d8;
+        --ar-accent-glow:   rgba(74,184,216,0.55);
+        --ar-accent-soft:   rgba(74,184,216,0.18);
+        --ar-surface:       rgba(255,255,255,0.90);
+        --ar-surface-hover: rgba(235,250,255,0.98);
+        --ar-overlay:       rgba(0,0,0,0.44);
+        --ar-text-dim:      rgba(255,255,255,0.70);
+        --ar-text-label:    rgba(255,255,255,0.55);
+        --ar-radius-pill:   24px;
+        --ar-radius-circle: 50%;
+        --ar-shadow:        0 2px 16px rgba(0,0,0,0.20);
+        --ar-transition:    0.25s ease;
+      }
+
+      /* ─────────────────────────────────────────────────────────
+         LOADER
+      ───────────────────────────────────────────────────────── */
       #terrain-ar-loader {
         position: fixed; inset: 0;
         display: flex; flex-direction: column;
         align-items: center; justify-content: center;
-        gap: 20px; pointer-events: none;
+        gap: 18px; pointer-events: none;
         z-index: 9999; transition: opacity 0.45s ease;
         background: transparent;
       }
@@ -18,12 +39,12 @@ const injectStyles = (() => {
       .ar-loader-orbit { position: relative; width: 48px; height: 48px; }
       .ar-loader-ring {
         position: absolute; inset: 0; border-radius: 50%;
-        border: 1.5px solid rgba(79,195,247,0.18);
+        border: 1.5px solid var(--ar-accent-soft);
       }
       .ar-loader-ball {
         position: absolute; width: 10px; height: 10px;
-        border-radius: 50%; background: #4fc3f7;
-        box-shadow: 0 0 10px rgba(79,195,247,0.7), 0 0 20px rgba(79,195,247,0.3);
+        border-radius: 50%; background: var(--ar-accent);
+        box-shadow: 0 0 10px var(--ar-accent-glow), 0 0 22px rgba(74,184,216,0.25);
         top: -5px; left: 50%; transform-origin: 50% 29px;
         animation: ar-ball-orbit 1.1s cubic-bezier(0.45,0.05,0.55,0.95) infinite;
       }
@@ -34,8 +55,8 @@ const injectStyles = (() => {
       .ar-loader-label {
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 11px; font-weight: 300;
-        letter-spacing: 0.22em; text-transform: uppercase;
-        color: rgba(232,244,255,0.55);
+        letter-spacing: 0.24em; text-transform: uppercase;
+        color: var(--ar-text-label);
         animation: ar-label-pulse 1.8s ease-in-out infinite;
       }
       @keyframes ar-label-pulse {
@@ -43,44 +64,126 @@ const injectStyles = (() => {
         50%       { opacity: 1; }
       }
 
-      /* ── Reset button ── */
+      /* ─────────────────────────────────────────────────────────
+         RESET BUTTON  (bottom-right)
+      ───────────────────────────────────────────────────────── */
       #ar-reset-btn {
-        position: fixed; bottom: 32px; right: 20px; z-index: 9998;
-        display: flex; align-items: center; gap: 6px;
-        background: rgba(255,255,255,0.88); border: none; border-radius: 22px;
-        padding: 10px 16px 10px 12px;
+        position: fixed; bottom: 28px; right: 20px; z-index: 9998;
+        display: flex; align-items: center; gap: 7px;
+        background: var(--ar-surface); border: none;
+        border-radius: var(--ar-radius-pill);
+        padding: 11px 18px 11px 14px;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 12px; font-weight: 500; letter-spacing: 0.06em;
-        text-transform: uppercase; color: #4ab8d8; cursor: pointer;
-        box-shadow: 0 2px 14px rgba(0,0,0,0.18);
+        font-size: 11px; font-weight: 600; letter-spacing: 0.10em;
+        text-transform: uppercase; color: var(--ar-accent); cursor: pointer;
+        box-shadow: var(--ar-shadow);
         -webkit-tap-highlight-color: transparent;
-        transition: background 0.15s, opacity 0.25s;
+        transition: background var(--ar-transition), opacity var(--ar-transition);
         opacity: 0; pointer-events: none;
       }
       #ar-reset-btn.ar-reset-visible { opacity: 1; pointer-events: all; }
-      #ar-reset-btn:active { background: rgba(235,248,255,0.98); }
-      #ar-reset-btn svg { color: #4ab8d8; flex-shrink: 0; }
+      #ar-reset-btn:active { background: var(--ar-surface-hover); }
+      #ar-reset-btn svg { color: var(--ar-accent); flex-shrink: 0; }
 
-      /* ── Fullscreen button ── */
+      /* ─────────────────────────────────────────────────────────
+         FULLSCREEN BUTTON  (top-right)
+      ───────────────────────────────────────────────────────── */
       #ar-fullscreen-btn {
         position: fixed; top: 20px; right: 20px; z-index: 9998;
-        width: 38px; height: 38px;
+        width: 40px; height: 40px;
         display: flex; align-items: center; justify-content: center;
-        background: rgba(255,255,255,0.88); border: none; border-radius: 50%;
-        cursor: pointer; box-shadow: 0 2px 14px rgba(0,0,0,0.18);
+        background: var(--ar-surface); border: none;
+        border-radius: var(--ar-radius-circle);
+        cursor: pointer; box-shadow: var(--ar-shadow);
         -webkit-tap-highlight-color: transparent;
-        transition: background 0.15s, opacity 0.25s;
+        transition: background var(--ar-transition), opacity var(--ar-transition);
         opacity: 0; pointer-events: none;
-        color: #4ab8d8;
+        color: var(--ar-accent);
       }
       #ar-fullscreen-btn.ar-fs-visible { opacity: 1; pointer-events: all; }
-      #ar-fullscreen-btn:active { background: rgba(235,248,255,0.98); }
+      #ar-fullscreen-btn:active { background: var(--ar-surface-hover); }
 
-      /* ── Gesture hint ── */
-      #ar-gesture-hint {
-        position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+      /* ─────────────────────────────────────────────────────────
+         ROTATION BAR  (bottom-center, above reset)
+      ───────────────────────────────────────────────────────── */
+      #ar-rotation-bar {
+        position: fixed; bottom: 88px; left: 50%;
+        transform: translateX(-50%);
         z-index: 9998;
-        display: flex; flex-direction: column; align-items: center; gap: 10px;
+        display: flex; flex-direction: column;
+        align-items: center; gap: 7px;
+        opacity: 0; transition: opacity var(--ar-transition);
+        pointer-events: none;
+      }
+      #ar-rotation-bar.ar-rot-visible {
+        opacity: 1; pointer-events: all;
+      }
+
+      .ar-rot-track {
+        position: relative;
+        width: 240px; height: 48px;
+        background: var(--ar-surface);
+        border-radius: var(--ar-radius-pill);
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: var(--ar-shadow);
+        cursor: ew-resize;
+        overflow: visible;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: none;
+        user-select: none;
+      }
+
+      /* track line */
+      .ar-rot-line {
+        position: absolute;
+        left: 52px; right: 52px; height: 2px;
+        background: linear-gradient(90deg,
+          transparent 0%,
+          var(--ar-accent-soft) 20%,
+          rgba(74,184,216,0.35) 50%,
+          var(--ar-accent-soft) 80%,
+          transparent 100%);
+        border-radius: 1px;
+        pointer-events: none;
+      }
+
+      /* chevron arrows */
+      .ar-rot-chevron {
+        position: absolute;
+        top: 50%; transform: translateY(-50%);
+        display: flex; align-items: center;
+        color: rgba(74,184,216,0.45);
+        pointer-events: none;
+      }
+      .ar-rot-chevron-left  { left: 14px; }
+      .ar-rot-chevron-right { right: 14px; }
+
+      /* draggable thumb */
+      #ar-rot-thumb {
+        position: relative; z-index: 1;
+        width: 32px; height: 32px; border-radius: 50%;
+        background: var(--ar-accent);
+        box-shadow: 0 2px 10px var(--ar-accent-glow);
+        flex-shrink: 0;
+        will-change: transform;
+        pointer-events: none; /* track handles events */
+      }
+
+      .ar-rot-label {
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 9px; font-weight: 600;
+        letter-spacing: 0.22em; text-transform: uppercase;
+        color: var(--ar-text-label);
+      }
+
+      /* ─────────────────────────────────────────────────────────
+         GESTURE HINT  (bottom-center, above rotation bar)
+      ───────────────────────────────────────────────────────── */
+      #ar-gesture-hint {
+        position: fixed; bottom: 176px; left: 50%;
+        transform: translateX(-50%);
+        z-index: 9998;
+        display: flex; flex-direction: column; align-items: center; gap: 8px;
         pointer-events: none;
         opacity: 0; transition: opacity 0.4s ease;
       }
@@ -89,12 +192,12 @@ const injectStyles = (() => {
 
       .ar-hint-row {
         display: flex; align-items: center; gap: 10px;
-        background: rgba(0,0,0,0.42); backdrop-filter: blur(8px);
-        border-radius: 20px; padding: 8px 14px;
+        background: var(--ar-overlay); backdrop-filter: blur(10px);
+        border-radius: var(--ar-radius-pill); padding: 9px 16px;
       }
       .ar-hint-icon {
-        width: 28px; height: 28px; flex-shrink: 0;
-        color: rgba(255,255,255,0.9);
+        width: 26px; height: 26px; flex-shrink: 0;
+        color: rgba(255,255,255,0.88);
       }
       .ar-hint-text {
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -102,22 +205,18 @@ const injectStyles = (() => {
         color: rgba(255,255,255,0.85); white-space: nowrap;
       }
 
-      /* finger drag animation */
-      .ar-hint-finger {
-        width: 22px; height: 22px; flex-shrink: 0;
-        color: rgba(255,255,255,0.9);
-        animation: ar-hint-drag 1.6s ease-in-out infinite;
+      /* pinch icon animation */
+      .ar-hint-icon-pinch { animation: ar-hint-pinch 1.8s ease-in-out infinite; }
+      @keyframes ar-hint-pinch {
+        0%,100% { transform: scale(1);    opacity: 0.6; }
+        50%      { transform: scale(0.82); opacity: 1;   }
       }
+
+      /* drag icon animation */
+      .ar-hint-icon-drag { animation: ar-hint-drag 1.6s ease-in-out infinite; }
       @keyframes ar-hint-drag {
         0%,100% { transform: translateX(0);   opacity: 0.5; }
-        50%      { transform: translateX(8px); opacity: 1;   }
-      }
-      .ar-hint-finger-rotate {
-        animation: ar-hint-rotate 1.6s ease-in-out infinite;
-      }
-      @keyframes ar-hint-rotate {
-        0%,100% { transform: rotate(-20deg); opacity: 0.5; }
-        50%      { transform: rotate( 20deg); opacity: 1;   }
+        50%      { transform: translateX(7px); opacity: 1;   }
       }
     `
     document.head.appendChild(s)
@@ -138,14 +237,14 @@ function exitFullscreen(): void {
   fn?.call(doc)
 }
 
-function isFullscreen(): boolean {
+export function isFullscreen(): boolean {
   const doc = document as any
   return !!(doc.fullscreenElement ?? doc.webkitFullscreenElement ?? doc.mozFullScreenElement)
 }
 
 const ICON_EXPAND = `
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-       stroke="currentColor" stroke-width="2.2"
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2.4"
        stroke-linecap="round" stroke-linejoin="round">
     <polyline points="15 3 21 3 21 9"/>
     <polyline points="9 21 3 21 3 15"/>
@@ -154,8 +253,8 @@ const ICON_EXPAND = `
   </svg>`
 
 const ICON_COMPRESS = `
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-       stroke="currentColor" stroke-width="2.2"
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" stroke-width="2.4"
        stroke-linecap="round" stroke-linejoin="round">
     <polyline points="4 14 10 14 10 20"/>
     <polyline points="20 10 14 10 14 4"/>
@@ -170,10 +269,15 @@ export class ArUiOverlay {
   private resetBtn:    HTMLElement | null = null
   private fsBtn:       HTMLElement | null = null
   private gestureHint: HTMLElement | null = null
+  private rotBar:      HTMLElement | null = null
+  private rotThumb:    HTMLElement | null = null
+
   private _t1 = 0
   private _t2 = 0
-  private _hintTimer   = 0
-  private _fsListener: (() => void) | null = null
+  private _hintTimer    = 0
+  private _fsListener:  (() => void) | null = null
+  private _rotSpringRAF = 0
+  private _rotCleanup:  (() => void) | null = null
 
   // ── Loader ────────────────────────────────────────────────────────────────
 
@@ -187,17 +291,17 @@ export class ArUiOverlay {
         <div class="ar-loader-ring"></div>
         <div class="ar-loader-ball"></div>
       </div>
-      <span class="ar-loader-label" id="ar-loader-text">Iniciando cámara</span>
+      <span class="ar-loader-label" id="ar-loader-text">Starting camera</span>
     `
     document.body.appendChild(this.loader)
 
     this._t1 = window.setTimeout(() => {
       const el = document.getElementById('ar-loader-text')
-      if (el) el.textContent = 'Detectando entorno'
+      if (el) el.textContent = 'Detecting environment'
     }, 4000)
     this._t2 = window.setTimeout(() => {
       const el = document.getElementById('ar-loader-text')
-      if (el) el.textContent = 'Preparando experiencia'
+      if (el) el.textContent = 'Preparing experience'
     }, 8000)
   }
 
@@ -211,7 +315,7 @@ export class ArUiOverlay {
         <div class="ar-loader-ring"></div>
         <div class="ar-loader-ball"></div>
       </div>
-      <span class="ar-loader-label" id="ar-loader-text">Detectando entorno</span>
+      <span class="ar-loader-label" id="ar-loader-text">Detecting environment</span>
     `
     document.body.appendChild(this.loader)
   }
@@ -235,13 +339,13 @@ export class ArUiOverlay {
     const btn = document.createElement('button')
     btn.id = 'ar-reset-btn'
     btn.innerHTML = `
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2.2"
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.4"
            stroke-linecap="round" stroke-linejoin="round">
         <polyline points="1 4 1 10 7 10"/>
         <path d="M3.51 15a9 9 0 1 0 .49-5"/>
       </svg>
-      Reiniciar
+      Reset
     `
     document.body.appendChild(btn)
     this.resetBtn = btn
@@ -269,8 +373,8 @@ export class ArUiOverlay {
 
     const btn = document.createElement('button')
     btn.id = 'ar-fullscreen-btn'
-    btn.setAttribute('aria-label', 'Pantalla completa')
-    btn.innerHTML = ICON_EXPAND
+    btn.setAttribute('aria-label', 'Toggle fullscreen')
+    btn.innerHTML = isFullscreen() ? ICON_COMPRESS : ICON_EXPAND
     document.body.appendChild(btn)
     this.fsBtn = btn
 
@@ -284,7 +388,6 @@ export class ArUiOverlay {
       }
     })
 
-    // Update icon when fullscreen state changes externally (back button, etc.)
     this._fsListener = () => {
       if (this.fsBtn) this.fsBtn.innerHTML = isFullscreen() ? ICON_COMPRESS : ICON_EXPAND
     }
@@ -292,7 +395,11 @@ export class ArUiOverlay {
     document.addEventListener('webkitfullscreenchange', this._fsListener)
   }
 
-  hideFullscreenButton(): void {
+  /**
+   * @param keepFullscreen  If true, does NOT call exitFullscreen() — use when
+   *                        transitioning to 360 viewer while staying fullscreen.
+   */
+  hideFullscreenButton(keepFullscreen = false): void {
     if (this.fsBtn) {
       const el = this.fsBtn
       this.fsBtn = null
@@ -304,12 +411,154 @@ export class ArUiOverlay {
       document.removeEventListener('webkitfullscreenchange', this._fsListener)
       this._fsListener = null
     }
-    if (isFullscreen()) exitFullscreen()
+    if (!keepFullscreen && isFullscreen()) exitFullscreen()
+  }
+
+  // ── Rotation bar ──────────────────────────────────────────────────────────
+  /**
+   * Shows the horizontal drag-to-rotate bar.
+   * `onRotate` receives a signed angle delta in radians each drag event.
+   */
+  showRotationBar(onRotate: (deltaRad: number) => void): void {
+    injectStyles()
+    if (this.rotBar) return
+
+    const bar = document.createElement('div')
+    bar.id = 'ar-rotation-bar'
+    bar.innerHTML = `
+      <div class="ar-rot-track" id="ar-rot-track">
+        <div class="ar-rot-line"></div>
+        <div class="ar-rot-chevron ar-rot-chevron-left">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.4"
+               stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </div>
+        <div class="ar-rot-chevron ar-rot-chevron-right">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.4"
+               stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </div>
+        <div id="ar-rot-thumb"></div>
+      </div>
+      <span class="ar-rot-label">Rotate</span>
+    `
+    document.body.appendChild(bar)
+    this.rotBar   = bar
+    this.rotThumb = bar.querySelector('#ar-rot-thumb')
+
+    requestAnimationFrame(() => bar.classList.add('ar-rot-visible'))
+
+    // ── Drag logic ──────────────────────────────────────────────────────────
+    const MAX_TRAVEL      = 88    // px from center
+    const SENSITIVITY     = 0.011 // radians per pixel
+    let thumbPos          = 0
+    let isDragging        = false
+    let lastX             = 0
+
+    const setThumb = (px: number) => {
+      thumbPos = Math.max(-MAX_TRAVEL, Math.min(MAX_TRAVEL, px))
+      if (this.rotThumb) this.rotThumb.style.transform = `translateX(${thumbPos}px)`
+    }
+
+    const cancelSpring = () => cancelAnimationFrame(this._rotSpringRAF)
+
+    const springBack = () => {
+      cancelSpring()
+      const animate = () => {
+        thumbPos *= 0.72
+        if (this.rotThumb) this.rotThumb.style.transform = `translateX(${thumbPos}px)`
+        if (Math.abs(thumbPos) > 0.6) {
+          this._rotSpringRAF = requestAnimationFrame(animate)
+        } else {
+          thumbPos = 0
+          if (this.rotThumb) this.rotThumb.style.transform = 'translateX(0)'
+        }
+      }
+      this._rotSpringRAF = requestAnimationFrame(animate)
+    }
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return
+      e.stopPropagation()
+      isDragging = true
+      lastX = e.touches[0].clientX
+      cancelSpring()
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!isDragging || e.touches.length !== 1) return
+      e.preventDefault()
+      e.stopPropagation()
+      const dx = e.touches[0].clientX - lastX
+      lastX = e.touches[0].clientX
+      setThumb(thumbPos + dx)
+      if (Math.abs(dx) > 0.2) onRotate(dx * SENSITIVITY)
+    }
+
+    const onTouchEnd = () => {
+      isDragging = false
+      springBack()
+    }
+
+    // Also support mouse for desktop testing
+    const onMouseDown = (e: MouseEvent) => {
+      isDragging = true
+      lastX = e.clientX
+      cancelSpring()
+      e.preventDefault()
+    }
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return
+      const dx = e.clientX - lastX
+      lastX = e.clientX
+      setThumb(thumbPos + dx)
+      if (Math.abs(dx) > 0.2) onRotate(dx * SENSITIVITY)
+    }
+    const onMouseUp = () => {
+      isDragging = false
+      springBack()
+    }
+
+    const track = bar.querySelector('#ar-rot-track') as HTMLElement
+    track.addEventListener('touchstart',  onTouchStart  as EventListener, {passive: false})
+    track.addEventListener('touchmove',   onTouchMove   as EventListener, {passive: false})
+    track.addEventListener('touchend',    onTouchEnd,                      {passive: true})
+    track.addEventListener('touchcancel', onTouchEnd,                      {passive: true})
+    track.addEventListener('mousedown',   onMouseDown   as EventListener)
+    window.addEventListener('mousemove',  onMouseMove   as EventListener)
+    window.addEventListener('mouseup',    onMouseUp)
+
+    this._rotCleanup = () => {
+      track.removeEventListener('touchstart',  onTouchStart  as EventListener)
+      track.removeEventListener('touchmove',   onTouchMove   as EventListener)
+      track.removeEventListener('touchend',    onTouchEnd)
+      track.removeEventListener('touchcancel', onTouchEnd)
+      track.removeEventListener('mousedown',   onMouseDown   as EventListener)
+      window.removeEventListener('mousemove',  onMouseMove   as EventListener)
+      window.removeEventListener('mouseup',    onMouseUp)
+    }
+  }
+
+  hideRotationBar(): void {
+    cancelAnimationFrame(this._rotSpringRAF)
+    this._rotCleanup?.()
+    this._rotCleanup = null
+    this.rotThumb = null
+
+    if (!this.rotBar) return
+    const el = this.rotBar
+    this.rotBar = null
+    el.classList.remove('ar-rot-visible')
+    setTimeout(() => el.remove(), 300)
   }
 
   // ── Gesture hint ──────────────────────────────────────────────────────────
-  // Shows two rows: pan/zoom hint and rotation hint.
-  // Fades in immediately, fades out after 5 s automatically.
+  // Two hints: pinch to zoom, drag to move.
+  // Rotation hint removed — handled by the rotation bar.
 
   showGestureHint(): void {
     injectStyles()
@@ -318,9 +567,9 @@ export class ArUiOverlay {
     const div = document.createElement('div')
     div.id = 'ar-gesture-hint'
     div.innerHTML = `
+      <!-- Pinch to zoom -->
       <div class="ar-hint-row">
-        <!-- two-finger pinch icon -->
-        <svg class="ar-hint-icon" viewBox="0 0 32 32" fill="none"
+        <svg class="ar-hint-icon ar-hint-icon-pinch" viewBox="0 0 32 32" fill="none"
              stroke="currentColor" stroke-width="1.8"
              stroke-linecap="round" stroke-linejoin="round">
           <circle cx="10" cy="10" r="3"/>
@@ -328,20 +577,11 @@ export class ArUiOverlay {
           <line x1="10" y1="13" x2="10" y2="24"/>
           <line x1="22" y1="9"  x2="22" y2="19"/>
         </svg>
-        <span class="ar-hint-text">Pellizca para escalar</span>
+        <span class="ar-hint-text">Pinch to scale</span>
       </div>
+      <!-- Drag to move -->
       <div class="ar-hint-row">
-        <!-- single finger drag icon -->
-        <svg class="ar-hint-finger ar-hint-finger-rotate" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="1.8"
-             stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-          <line x1="12" y1="22" x2="12" y2="22.01"/>
-        </svg>
-        <span class="ar-hint-text">Arrastra fuera del mapa para rotar</span>
-      </div>
-      <div class="ar-hint-row">
-        <svg class="ar-hint-finger" viewBox="0 0 24 24" fill="none"
+        <svg class="ar-hint-icon ar-hint-icon-drag" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="1.8"
              stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v0"/>
@@ -349,7 +589,7 @@ export class ArUiOverlay {
           <path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/>
           <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
         </svg>
-        <span class="ar-hint-text">Arrastra sobre el mapa para mover</span>
+        <span class="ar-hint-text">Drag to move</span>
       </div>
     `
     document.body.appendChild(div)
@@ -357,15 +597,10 @@ export class ArUiOverlay {
 
     requestAnimationFrame(() => div.classList.add('ar-hint-visible'))
 
-    // Auto-hide after 5 s
     this._hintTimer = window.setTimeout(() => this.hideGestureHint(), 5000)
 
-    // Also hide on first touch (user understood)
-    const onTouch = () => {
-      this.hideGestureHint()
-      window.removeEventListener('touchstart', onTouch)
-    }
-    window.addEventListener('touchstart', onTouch, { passive: true, once: true })
+    const onTouch = () => this.hideGestureHint()
+    window.addEventListener('touchstart', onTouch, {passive: true, once: true})
   }
 
   hideGestureHint(): void {

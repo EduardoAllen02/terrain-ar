@@ -1,6 +1,6 @@
 import * as ecs from '@8thwall/ecs'
 import {GestureHandler}     from './gesture-handler'
-import {ArUiOverlay}        from './ar-ui-overlay'
+import {ArUiOverlay, isFullscreen} from './ar-ui-overlay'
 import {BillboardManager}   from './billboard-manager'
 import {ExperienceRegistry} from './experience-registry'
 import {Viewer360}          from './viewer-360'
@@ -96,11 +96,23 @@ ecs.registerComponent({
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
+
+        // ── Preserve fullscreen state across AR → 360 transition ──────────
+        // hideFullscreenButton(true) keeps the browser in fullscreen mode;
+        // we then immediately re-show the button for the 360 view.
+        const wasFs = isFullscreen()
+
         gestures?.detach()
         ui.hideResetButton()
-        ui.hideFullscreenButton()
+        ui.hideRotationBar()
         ui.hideGestureHint()
+        ui.hideFullscreenButton(/* keepFullscreen */ wasFs)
+
         viewer.open(name, registry, () => seamlessReload())
+
+        // Show fullscreen button over the 360 viewer.
+        // Small delay lets the viewer finish its enter animation.
+        setTimeout(() => ui.showFullscreenButton(), 120)
       },
     })
 
@@ -187,10 +199,21 @@ ecs.registerComponent({
           registry.register(hotspotNames)
         }
 
+        // ── Rotation bar — rotates model on Y axis ─────────────────────────
+        ui.showRotationBar((deltaRad: number) => {
+          const half = deltaRad * 0.5
+          world.transform.rotateSelf(schema.terrainEntity, {
+            x: 0,
+            y: Math.sin(half),
+            z: 0,
+            w: Math.cos(half),
+          })
+        })
+
         ui.showResetButton(() => seamlessReload())
         ui.showFullscreenButton()
 
-        // Gesture hint: shown once per session, fades after 5s or on first touch
+        // Gesture hints (pinch + drag); auto-hide after 5 s or on first touch
         ui.showGestureHint()
 
         dataAttribute.cursor(eid).placed = true
@@ -205,6 +228,7 @@ ecs.registerComponent({
         gestures = null
         boards.dispose(world.three.scene)
         ui.hideResetButton()
+        ui.hideRotationBar()
         ui.hideFullscreenButton()
         ui.hideGestureHint()
       })
