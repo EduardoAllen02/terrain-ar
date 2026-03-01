@@ -191,7 +191,7 @@ export class Viewer360 {
     gyroOk: boolean, onClose: () => void,
   ): void {
     const count    = registry.getCount()
-    const hintText = gyroOk ? 'Mueve el teléfono para explorar' : 'Arrastra para explorar'
+    const hintText = gyroOk ? 'Move phone to explore' : 'Drag to explore'
 
     const div = document.createElement('div')
     div.id = 'v360-overlay'
