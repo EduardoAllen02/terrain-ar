@@ -1,10 +1,17 @@
 import * as ecs from '@8thwall/ecs'
-import {GestureHandler}     from './gesture-handler'
-import {ArUiOverlay, isFullscreen} from './ar-ui-overlay'
-import {BillboardManager}   from './billboard-manager'
-import {ExperienceRegistry} from './experience-registry'
-import {Viewer360}          from './viewer-360'
+import {GestureHandler}              from './gesture-handler'
+import {ArUiOverlay, isFullscreen,
+        installViewportFix}          from './ar-ui-overlay'
+import {BillboardManager}            from './billboard-manager'
+import {ExperienceRegistry}          from './experience-registry'
+import {Viewer360}                   from './viewer-360'
 import {checkArSupport, checkCameraAccess} from './device-check'
+
+// ── Install viewport-orientation fix ASAP (before any component mounts) ─────
+// Resets <meta name="viewport"> on every orientationchange so Chrome Android
+// re-evaluates the layout-viewport width. This is the canonical fix for the
+// "UI stays small / zoomed-out after rotating back to portrait" bug.
+installViewportFix()
 
 const CAMERA_OFFSET  = 0.6
 const INITIAL_SCALE  = 0.28
@@ -44,9 +51,13 @@ function disableAbsoluteScale(world: any, terrainEid: any): void {
 
 function seamlessReload(): void {
   const div = document.createElement('div')
-  div.style.cssText = `position:fixed;inset:0;z-index:999999;background:#000;pointer-events:all;opacity:0;transition:opacity .25s ease;`
+  div.style.cssText =
+    'position:fixed;inset:0;z-index:999999;background:#000;pointer-events:all;opacity:0;transition:opacity .25s ease;'
   document.body.appendChild(div)
-  requestAnimationFrame(() => { div.style.opacity = '1'; setTimeout(() => window.location.reload(), 280) })
+  requestAnimationFrame(() => {
+    div.style.opacity = '1'
+    setTimeout(() => window.location.reload(), 280)
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,9 +85,7 @@ ecs.registerComponent({
         if (viewing360) return
         viewing360 = true
 
-        // Preserve fullscreen across AR → 360 transition
         const wasFs = isFullscreen()
-
         gestures?.detach()
         ui.hideResetButton()
         ui.hideRotationBar()
@@ -84,8 +93,6 @@ ecs.registerComponent({
         ui.hideFullscreenButton(/* keepFullscreen */ wasFs)
 
         viewer.open(name, registry, () => seamlessReload())
-
-        // Re-show fullscreen button over the 360 viewer
         setTimeout(() => ui.showFullscreenButton(), 120)
       },
     })
@@ -99,46 +106,51 @@ ecs.registerComponent({
     const hideModel = () => {
       world.setPosition(schema.terrainEntity, 0, -9999, 0)
       world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
-      ecs.Scale.set(world, schema.terrainEntity, {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
+      ecs.Scale.set(world, schema.terrainEntity,
+        {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
     }
-
-    // ── loading ─────────────────────────────────────────────────────────────
 
     ecs.defineState('loading').initial()
       .onEnter(() => {
         checkArSupport()
         checkCameraAccess(() => {}, () => {})
         hideModel()
-        if (ecs.Hidden.has(world, schema.terrainEntity)) ecs.Hidden.remove(world, schema.terrainEntity)
+        if (ecs.Hidden.has(world, schema.terrainEntity))
+          ecs.Hidden.remove(world, schema.terrainEntity)
         ui.showLoader()
       })
       .onTick(() => {
         if (isModelReady(world, schema.terrainEntity)) {
-          if (!absoluteScaleDisabled) { disableAbsoluteScale(world, schema.terrainEntity); absoluteScaleDisabled = true }
+          if (!absoluteScaleDisabled) {
+            disableAbsoluteScale(world, schema.terrainEntity)
+            absoluteScaleDisabled = true
+          }
           doReady.trigger()
         }
       })
       .onTrigger(doReady, 'scanning')
 
-    // ── scanning ─────────────────────────────────────────────────────────────
-
     ecs.defineState('scanning')
-      .onEnter(() => { ui.hideLoader(); hideModel(); dataAttribute.cursor(eid).placed = false })
+      .onEnter(() => {
+        ui.hideLoader(); hideModel()
+        dataAttribute.cursor(eid).placed = false
+      })
       .onTick(() => {
         const hits       = world.raycastFrom(eid)
         const groundHits = hits.filter((h: any) => h.eid === schema.ground)
         if (groundHits.length === 0) return
         const hit = groundHits[0].point
         const cam = ecs.Position.get(world, eid)
-        const {x: px, z: pz} = offsetTowardCamera(THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET)
+        const {x: px, z: pz} = offsetTowardCamera(
+          THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET,
+        )
         world.setPosition(schema.terrainEntity, px, hit.y + Y_ABOVE_GROUND, pz)
         world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
-        ecs.Scale.set(world, schema.terrainEntity, {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
+        ecs.Scale.set(world, schema.terrainEntity,
+          {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
         doPlaced.trigger()
       })
       .onTrigger(doPlaced, 'placed')
-
-    // ── placed ───────────────────────────────────────────────────────────────
 
     ecs.defineState('placed')
       .onEnter(async () => {
@@ -153,18 +165,14 @@ ecs.registerComponent({
           registry.register(names)
         }
 
-        // Rotation bar — wired to rotate the terrain on Y
         ui.showRotationBar((deltaRad: number) => {
           const half = deltaRad * 0.5
-          world.transform.rotateSelf(schema.terrainEntity, {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
+          world.transform.rotateSelf(schema.terrainEntity,
+            {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
         })
-
-        // Reset button lives in the same bottom bar row as the rotation track
         ui.showResetButton(() => seamlessReload())
-
         ui.showFullscreenButton()
         ui.showGestureHint()
-
         dataAttribute.cursor(eid).placed = true
       })
       .onTick(() => {

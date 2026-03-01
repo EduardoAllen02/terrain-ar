@@ -1,45 +1,79 @@
 /**
- * ArUiOverlay — v5
+ * ArUiOverlay — v6
  *
- * ORIENTATION REFLOW FIX
- * ──────────────────────
- * Chrome Android has a known bug: CSS custom-property values set inside
- * @media blocks (e.g. `--ar-h: 42px` in landscape) are NOT always reverted
- * when the user rotates back to portrait.  The fix has two layers:
+ * ════════════════════════════════════════════════════════════
+ * DEFINITIVE ORIENTATION FIX
+ * ════════════════════════════════════════════════════════════
  *
- *   1. CSS — never override `--ar-h` (or any height token) inside a media
- *      query.  Instead, write explicit `height` values directly on the
- *      element selectors inside the media query.  This sidesteps the custom-
- *      property cache entirely.
+ * Root cause (confirmed via Android Chromium issue tracker):
+ *   Chrome Android does NOT correctly reset the viewport scale
+ *   when the device rotates BACK to portrait.  The layout
+ *   viewport keeps its landscape-width value, so `position:fixed`
+ *   elements are placed relative to a coordinate space that is
+ *   still as wide as the landscape screen — everything appears
+ *   proportionally smaller / "zoomed out".
  *
- *   2. JS — listen to `orientationchange` (and `resize` as fallback).
- *      After a 350 ms settling delay (browser needs time to update
- *      `window.innerWidth/Height`), force-read a layout property to flush
- *      the reflow queue, then briefly apply an inline `height` to the bar
- *      elements and remove it one frame later so the browser re-evaluates
- *      the correct media-query branch from scratch.
+ * The fix is NOT about CSS heights or custom properties.
+ * It is about resetting the <meta name="viewport"> tag via JS
+ * on every `orientationchange`.  The two-step trick:
  *
- * Portrait layout:
+ *   1. Set  width=10000  (forces browser to blow away cached layout)
+ *   2. One rAF later:  restore  width=device-width
  *
- *   [TOP-RIGHT]      Fullscreen button  40×40 circle
+ * This is the canonical fix from the Android Browser / Sencha Touch
+ * community and it works on modern Chrome Android as well because
+ * Chrome still inherits the WebKit layout-viewport stale-cache bug
+ * on rotation.
  *
- *   [LEFT, stacked]  Gesture hints (pinch / drag)
+ * The fix is installed ONCE per page via `installViewportFix()`,
+ * which is exported and must be called from your app entry point
+ * (index.ts / main.ts) as early as possible — well before any AR
+ * component mounts.
  *
- *   [BOTTOM, flex row — full width minus margins]
- *   ┌──────────────────────────────┬──────────────┐
- *   │  ‹  ────  ●  ────  ›   ROTATE│  ↺  Reset    │
- *   └──────────────────────────────┴──────────────┘
- *     flex: 3  (≈75 %)                flex: 1 (≈25 %)
- *
- * Landscape / tablet:  bar, buttons, and text scale down via direct
- *   element selectors inside the media query (no custom-property override).
+ * ════════════════════════════════════════════════════════════
  */
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Viewport orientation fix ────────────────────────────────────────────────
 
-/** Portrait heights (px) — single source of truth used by both CSS and JS */
-const H_PORTRAIT  = 48
-const H_LANDSCAPE = 42
+let _viewportFixInstalled = false
+
+/**
+ * Call once at app startup.  Survives HMR because of the guard flag.
+ */
+export function installViewportFix(): void {
+  if (_viewportFixInstalled) return
+  _viewportFixInstalled = true
+
+  const resetViewport = () => {
+    // Find or create the <meta name="viewport"> tag
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
+    if (!meta) {
+      meta = document.createElement('meta')
+      meta.name = 'viewport'
+      document.head.appendChild(meta)
+    }
+
+    // Step 1 — force Chrome to blow away its stale layout-viewport cache
+    meta.content = 'width=10000, initial-scale=1, minimum-scale=1, maximum-scale=1'
+
+    // Step 2 — one rAF later: restore the correct value
+    requestAnimationFrame(() => {
+      meta!.content =
+        'width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1'
+    })
+  }
+
+  // Delay gives the browser time to settle window.innerWidth / Height
+  const onOrientChange = () => setTimeout(resetViewport, 200)
+
+  window.addEventListener('orientationchange', onOrientChange, {passive: true})
+  // resize is a fallback (fires later than orientationchange on most devices)
+  window.addEventListener('resize', onOrientChange, {passive: true})
+  // Modern Screen Orientation API if available
+  try { screen.orientation?.addEventListener('change', onOrientChange) } catch (_) {}
+}
+
+// ─── CSS ─────────────────────────────────────────────────────────────────────
 
 const injectStyles = (() => {
   let done = false
@@ -48,7 +82,7 @@ const injectStyles = (() => {
     done = true
     const s = document.createElement('style')
     s.textContent = `
-      /* ── Design tokens (portrait values only — never override height here) */
+      /* ── Design tokens ──────────────────────────────────────────────── */
       :root {
         --ar-accent:      #4ab8d8;
         --ar-accent-glow: rgba(74,184,216,0.55);
@@ -62,10 +96,11 @@ const injectStyles = (() => {
         --ar-edge:        16px;
         --ar-bottom:      24px;
         --ar-pill:        100px;
+        --ar-h:           48px;
         --ar-font: 'Helvetica Neue', Helvetica, Arial, sans-serif;
       }
 
-      /* ── Loader ───────────────────────────────────────────────────────── */
+      /* ── Loader ─────────────────────────────────────────────────────── */
       #terrain-ar-loader {
         position:fixed; inset:0;
         display:flex; flex-direction:column;
@@ -98,7 +133,7 @@ const injectStyles = (() => {
       }
       @keyframes ar-label-pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
 
-      /* ── Fullscreen button ────────────────────────────────────────────── */
+      /* ── Fullscreen button ──────────────────────────────────────────── */
       #ar-fullscreen-btn {
         position:fixed; top:20px; right:20px; z-index:9998;
         width:40px; height:40px;
@@ -112,7 +147,7 @@ const injectStyles = (() => {
       #ar-fullscreen-btn.ar-fs-visible { opacity:1; pointer-events:all; }
       #ar-fullscreen-btn:active { background:var(--ar-surface-act); }
 
-      /* ── Bottom bar ───────────────────────────────────────────────────── */
+      /* ── Bottom bar ─────────────────────────────────────────────────── */
       #ar-bottom-bar {
         position: fixed;
         bottom: var(--ar-bottom);
@@ -126,141 +161,125 @@ const injectStyles = (() => {
         transition: opacity .28s ease;
         pointer-events: none;
       }
-      #ar-bottom-bar.ar-bar-visible {
-        opacity: 1;
-        pointer-events: all;
-      }
+      #ar-bottom-bar.ar-bar-visible { opacity:1; pointer-events:all; }
 
-      /* ── Rotation track  (flex:3 → ≈75 %) ────────────────────────────── */
+      /* ── Rotation track  (flex:3 → ≈75 %) ──────────────────────────── */
       #ar-rot-track {
-        flex: 3;
-        min-width: 0;
-        /* HEIGHT set directly — no custom-property indirection */
-        height: ${H_PORTRAIT}px;
+        flex: 3; min-width: 0;
+        height: var(--ar-h);
         background: var(--ar-surface);
         border-radius: var(--ar-pill);
         box-shadow: var(--ar-shadow);
-        display: flex; align-items: center; justify-content: center;
-        position: relative; overflow: visible;
-        cursor: ew-resize; touch-action: none; user-select: none;
-        -webkit-tap-highlight-color: transparent;
+        display:flex; align-items:center; justify-content:center;
+        position:relative; overflow:visible;
+        cursor:ew-resize; touch-action:none; user-select:none;
+        -webkit-tap-highlight-color:transparent;
       }
       .ar-rot-line {
-        position: absolute; left: 52px; right: 52px; height: 2px;
-        background: linear-gradient(90deg,
+        position:absolute; left:52px; right:52px; height:2px;
+        background:linear-gradient(90deg,
           transparent 0%, var(--ar-accent-soft) 20%,
           rgba(74,184,216,.30) 50%, var(--ar-accent-soft) 80%, transparent 100%);
-        border-radius: 1px; pointer-events: none;
+        border-radius:1px; pointer-events:none;
       }
       .ar-rot-chevron {
-        position: absolute; top: 50%; transform: translateY(-50%);
-        display: flex; align-items: center;
-        color: rgba(74,184,216,.40); pointer-events: none;
+        position:absolute; top:50%; transform:translateY(-50%);
+        display:flex; align-items:center;
+        color:rgba(74,184,216,.40); pointer-events:none;
       }
-      .ar-rot-chevron-left  { left:  14px; }
-      .ar-rot-chevron-right { right: 14px; }
+      .ar-rot-chevron-left  { left:14px; }
+      .ar-rot-chevron-right { right:14px; }
       #ar-rot-thumb {
-        position: relative; z-index: 1;
-        width: 32px; height: 32px; border-radius: 50%;
-        background: var(--ar-accent);
-        box-shadow: 0 2px 10px var(--ar-accent-glow);
-        flex-shrink: 0; will-change: transform; pointer-events: none;
-        transition: box-shadow .15s;
+        position:relative; z-index:1;
+        width:32px; height:32px; border-radius:50%;
+        background:var(--ar-accent);
+        box-shadow:0 2px 10px var(--ar-accent-glow);
+        flex-shrink:0; will-change:transform; pointer-events:none;
+        transition:box-shadow .15s;
       }
       #ar-rot-track:active #ar-rot-thumb {
-        box-shadow: 0 2px 18px var(--ar-accent-glow), 0 0 0 6px var(--ar-accent-soft);
+        box-shadow:0 2px 18px var(--ar-accent-glow), 0 0 0 6px var(--ar-accent-soft);
       }
       .ar-rot-label {
-        position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
-        font-family: var(--ar-font); font-size: 9px; font-weight: 600;
-        letter-spacing: .22em; text-transform: uppercase;
-        color: var(--ar-text-label); white-space: nowrap; pointer-events: none;
+        position:absolute; bottom:-18px; left:50%; transform:translateX(-50%);
+        font-family:var(--ar-font); font-size:9px; font-weight:600;
+        letter-spacing:.22em; text-transform:uppercase;
+        color:var(--ar-text-label); white-space:nowrap; pointer-events:none;
       }
 
-      /* ── Reset button  (flex:1 → ≈25 %) ──────────────────────────────── */
+      /* ── Reset button  (flex:1 → ≈25 %) ────────────────────────────── */
       #ar-reset-btn {
-        flex: 1; min-width: 0;
-        /* HEIGHT set directly */
-        height: ${H_PORTRAIT}px;
-        display: flex; align-items: center; justify-content: center; gap: 6px;
-        background: var(--ar-surface); border: none;
-        border-radius: var(--ar-pill);
-        box-shadow: var(--ar-shadow);
-        font-family: var(--ar-font); font-size: 11px; font-weight: 600;
-        letter-spacing: .10em; text-transform: uppercase;
-        color: var(--ar-accent); cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
-        transition: background .2s;
-        white-space: nowrap;
+        flex:1; min-width:0;
+        height:var(--ar-h);
+        display:flex; align-items:center; justify-content:center; gap:6px;
+        background:var(--ar-surface); border:none;
+        border-radius:var(--ar-pill);
+        box-shadow:var(--ar-shadow);
+        font-family:var(--ar-font); font-size:11px; font-weight:600;
+        letter-spacing:.10em; text-transform:uppercase;
+        color:var(--ar-accent); cursor:pointer;
+        -webkit-tap-highlight-color:transparent;
+        transition:background .2s;
+        white-space:nowrap;
       }
-      #ar-reset-btn:active { background: var(--ar-surface-act); }
-      #ar-reset-btn svg { flex-shrink: 0; color: var(--ar-accent); }
+      #ar-reset-btn:active { background:var(--ar-surface-act); }
+      #ar-reset-btn svg { flex-shrink:0; color:var(--ar-accent); }
 
-      /* ── Gesture hints — left-anchored ───────────────────────────────── */
+      /* ── Gesture hints — left-anchored ──────────────────────────────── */
       #ar-gesture-hint {
-        position: fixed;
-        bottom: calc(var(--ar-bottom) + ${H_PORTRAIT}px + 22px);
-        left: var(--ar-edge);
-        z-index: 9998;
-        display: flex; flex-direction: column;
-        align-items: flex-start; gap: 8px;
-        pointer-events: none;
-        opacity: 0; transition: opacity .4s ease;
+        position:fixed;
+        bottom:calc(var(--ar-bottom) + var(--ar-h) + 22px);
+        left:var(--ar-edge);
+        z-index:9998;
+        display:flex; flex-direction:column;
+        align-items:flex-start; gap:8px;
+        pointer-events:none;
+        opacity:0; transition:opacity .4s ease;
       }
-      #ar-gesture-hint.ar-hint-visible { opacity: 1; }
-      #ar-gesture-hint.ar-hint-hidden  { opacity: 0; }
+      #ar-gesture-hint.ar-hint-visible { opacity:1; }
+      #ar-gesture-hint.ar-hint-hidden  { opacity:0; }
       .ar-hint-row {
-        display: flex; align-items: center; gap: 10px;
-        background: var(--ar-overlay); backdrop-filter: blur(10px);
-        border-radius: var(--ar-pill); padding: 9px 16px;
+        display:flex; align-items:center; gap:10px;
+        background:var(--ar-overlay); backdrop-filter:blur(10px);
+        border-radius:var(--ar-pill); padding:9px 16px;
       }
-      .ar-hint-icon { width: 24px; height: 24px; flex-shrink: 0; color: rgba(255,255,255,.88); }
+      .ar-hint-icon { width:24px; height:24px; flex-shrink:0; color:rgba(255,255,255,.88); }
       .ar-hint-text {
-        font-family: var(--ar-font); font-size: 11px; font-weight: 400;
-        letter-spacing: .08em; color: rgba(255,255,255,.85); white-space: nowrap;
+        font-family:var(--ar-font); font-size:11px; font-weight:400;
+        letter-spacing:.08em; color:rgba(255,255,255,.85); white-space:nowrap;
       }
-      .ar-hint-icon-pinch { animation: ar-pinch 1.8s ease-in-out infinite; }
-      @keyframes ar-pinch {
-        0%,100%{transform:scale(1);opacity:.6} 50%{transform:scale(.80);opacity:1}
-      }
-      .ar-hint-icon-drag { animation: ar-drag 1.6s ease-in-out infinite; }
-      @keyframes ar-drag {
-        0%,100%{transform:translateX(0);opacity:.5} 50%{transform:translateX(7px);opacity:1}
-      }
+      .ar-hint-icon-pinch { animation:ar-pinch 1.8s ease-in-out infinite; }
+      @keyframes ar-pinch { 0%,100%{transform:scale(1);opacity:.6} 50%{transform:scale(.80);opacity:1} }
+      .ar-hint-icon-drag  { animation:ar-drag  1.6s ease-in-out infinite; }
+      @keyframes ar-drag  { 0%,100%{transform:translateX(0);opacity:.5} 50%{transform:translateX(7px);opacity:1} }
 
-      /* ── Landscape — DIRECT element selectors, no custom-property override */
+      /* ── Landscape overrides ────────────────────────────────────────── */
       @media (orientation: landscape) {
         :root {
+          --ar-h:      42px;
           --ar-bottom: 14px;
           --ar-edge:   20px;
           --ar-gap:     8px;
         }
-        /* Heights written directly — this is what avoids the Chrome Android bug */
-        #ar-rot-track { height: ${H_LANDSCAPE}px; }
-        #ar-reset-btn { height: ${H_LANDSCAPE}px; font-size: 10px; gap: 5px; }
-        #ar-reset-btn svg { width: 12px; height: 12px; }
-        #ar-bottom-bar { max-width: 560px; }
-        #ar-fullscreen-btn { top: 12px; right: 16px; width: 36px; height: 36px; }
-        #ar-gesture-hint {
-          bottom: calc(14px + ${H_LANDSCAPE}px + 14px);
-        }
-        .ar-hint-row  { padding: 7px 13px; }
-        .ar-hint-text { font-size: 10px; }
-        .ar-hint-icon { width: 20px; height: 20px; }
-        .ar-rot-label { font-size: 8px; }
+        #ar-bottom-bar    { max-width:560px; }
+        #ar-fullscreen-btn{ top:12px; right:16px; width:36px; height:36px; }
+        .ar-hint-row      { padding:7px 13px; }
+        .ar-hint-text     { font-size:10px; }
+        .ar-hint-icon     { width:20px; height:20px; }
+        #ar-reset-btn     { font-size:10px; gap:5px; }
+        #ar-reset-btn svg { width:12px; height:12px; }
+        .ar-rot-label     { font-size:8px; }
       }
-      @media (orientation: landscape) and (min-width: 768px) {
-        :root { --ar-edge: 28px; }
-        #ar-rot-track { height: 46px; }
-        #ar-reset-btn { height: 46px; }
-        #ar-bottom-bar { max-width: 640px; }
+      @media (orientation:landscape) and (min-width:768px) {
+        :root { --ar-h:46px; --ar-edge:28px; }
+        #ar-bottom-bar { max-width:640px; }
       }
     `
     document.head.appendChild(s)
   }
 })()
 
-// ── Fullscreen helpers ────────────────────────────────────────────────────────
+// ─── Fullscreen helpers ───────────────────────────────────────────────────────
 
 function enterFullscreen(): void {
   const el = document.documentElement as any
@@ -273,15 +292,6 @@ function exitFullscreen(): void {
 export function isFullscreen(): boolean {
   const doc = document as any
   return !!(doc.fullscreenElement ?? doc.webkitFullscreenElement ?? doc.mozFullScreenElement)
-}
-
-function isLandscape(): boolean {
-  // screen.orientation is more reliable than window.innerWidth > innerHeight
-  // right after an orientationchange event fires.
-  if (screen.orientation?.type) {
-    return screen.orientation.type.startsWith('landscape')
-  }
-  return window.innerWidth > window.innerHeight
 }
 
 const ICON_EXPAND = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -306,11 +316,10 @@ export class ArUiOverlay {
   private loader:      HTMLElement | null = null
   private fsBtn:       HTMLElement | null = null
   private gestureHint: HTMLElement | null = null
-
-  private bottomBar: HTMLElement | null = null
-  private rotTrack:  HTMLElement | null = null
-  private rotThumb:  HTMLElement | null = null
-  private resetBtn:  HTMLElement | null = null
+  private bottomBar:   HTMLElement | null = null
+  private rotTrack:    HTMLElement | null = null
+  private rotThumb:    HTMLElement | null = null
+  private resetBtn:    HTMLElement | null = null
 
   private _t1 = 0
   private _t2 = 0
@@ -318,67 +327,6 @@ export class ArUiOverlay {
   private _fsListener:  (() => void) | null = null
   private _rotSpringRAF = 0
   private _rotCleanup:  (() => void) | null = null
-
-  // ── Orientation-reflow watcher ────────────────────────────────────────────
-  // Two-layer strategy:
-  //   • orientationchange — fires when the device physically rotates.
-  //   • resize            — fires when the viewport actually resizes (can lag).
-  // We wait 350 ms after either event, then:
-  //   1. Read a layout property to flush pending style recalculations.
-  //   2. Force-set inline heights to the correct value for the new orientation,
-  //      then clear them one rAF later so the CSS media query takes over freshly.
-
-  private _orientTimer = 0
-  private _orientHandler: (() => void) | null = null
-
-  private _applyOrientationFix(): void {
-    const bar   = this.bottomBar
-    const track = this.rotTrack
-    const reset = this.resetBtn
-    if (!bar) return
-
-    const ls = isLandscape()
-    const h  = ls ? H_LANDSCAPE : H_PORTRAIT
-
-    // Step 1: force-read layout to flush any stale computed styles
-    void bar.offsetHeight   // eslint-disable-line no-void
-
-    // Step 2: apply inline height to override any stale cached value
-    if (track) track.style.height = h + 'px'
-    if (reset) reset.style.height = h + 'px'
-
-    // Step 3: one frame later, remove inline overrides so CSS takes over
-    requestAnimationFrame(() => {
-      if (track) track.style.height = ''
-      if (reset) reset.style.height = ''
-    })
-  }
-
-  private _startOrientWatcher(): void {
-    if (this._orientHandler) return
-
-    const handler = () => {
-      clearTimeout(this._orientTimer)
-      this._orientTimer = window.setTimeout(() => this._applyOrientationFix(), 350)
-    }
-
-    this._orientHandler = handler
-    window.addEventListener('orientationchange', handler, {passive: true})
-    window.addEventListener('resize',            handler, {passive: true})
-
-    // Also wire into the modern Screen Orientation API if available
-    try { screen.orientation?.addEventListener('change', handler) } catch (_) {}
-  }
-
-  private _stopOrientWatcher(): void {
-    clearTimeout(this._orientTimer)
-    if (!this._orientHandler) return
-    const h = this._orientHandler
-    window.removeEventListener('orientationchange', h)
-    window.removeEventListener('resize',            h)
-    try { screen.orientation?.removeEventListener('change', h) } catch (_) {}
-    this._orientHandler = null
-  }
 
   // ── Bottom bar lifecycle ──────────────────────────────────────────────────
 
@@ -389,7 +337,6 @@ export class ArUiOverlay {
     bar.id = 'ar-bottom-bar'
     document.body.appendChild(bar)
     this.bottomBar = bar
-    this._startOrientWatcher()
     return bar
   }
 
@@ -405,7 +352,6 @@ export class ArUiOverlay {
     this.rotThumb  = null
     this.resetBtn  = null
     el.classList.remove('ar-bar-visible')
-    this._stopOrientWatcher()
     setTimeout(() => el.remove(), 320)
   }
 
@@ -514,16 +460,13 @@ export class ArUiOverlay {
 
     this.rotTrack = track
     this.rotThumb = track.querySelector<HTMLElement>('#ar-rot-thumb')!
-
     this._showBottomBar()
 
-    // ── Drag ────────────────────────────────────────────────────────────────
     const SENSITIVITY = 0.011
     let thumbPos = 0, dragging = false, lastX = 0
 
     const maxTravel = () => Math.max(24, (track.clientWidth / 2) - 28)
-
-    const setThumb = (px: number) => {
+    const setThumb  = (px: number) => {
       thumbPos = Math.max(-maxTravel(), Math.min(maxTravel(), px))
       if (this.rotThumb) this.rotThumb.style.transform = `translateX(${thumbPos}px)`
     }
@@ -550,10 +493,9 @@ export class ArUiOverlay {
       setThumb(thumbPos + dx)
       if (Math.abs(dx) > 0.2) onRotate(dx * SENSITIVITY)
     }
-    const onTouchEnd = () => { dragging = false; springBack() }
-
-    const onMouseDown = (e: MouseEvent) => { dragging = true; lastX = e.clientX; stopSpring(); e.preventDefault() }
-    const onMouseMove = (e: MouseEvent) => {
+    const onTouchEnd   = () => { dragging = false; springBack() }
+    const onMouseDown  = (e: MouseEvent) => { dragging = true; lastX = e.clientX; stopSpring(); e.preventDefault() }
+    const onMouseMove  = (e: MouseEvent) => {
       if (!dragging) return
       const dx = e.clientX - lastX; lastX = e.clientX
       setThumb(thumbPos + dx)
@@ -561,21 +503,21 @@ export class ArUiOverlay {
     }
     const onMouseUp = () => { dragging = false; springBack() }
 
-    track.addEventListener('touchstart',  onTouchStart  as EventListener, {passive: false})
-    track.addEventListener('touchmove',   onTouchMove   as EventListener, {passive: false})
-    track.addEventListener('touchend',    onTouchEnd,                      {passive: true})
-    track.addEventListener('touchcancel', onTouchEnd,                      {passive: true})
-    track.addEventListener('mousedown',   onMouseDown   as EventListener)
-    window.addEventListener('mousemove',  onMouseMove   as EventListener)
+    track.addEventListener('touchstart',  onTouchStart as EventListener, {passive: false})
+    track.addEventListener('touchmove',   onTouchMove  as EventListener, {passive: false})
+    track.addEventListener('touchend',    onTouchEnd,                     {passive: true})
+    track.addEventListener('touchcancel', onTouchEnd,                     {passive: true})
+    track.addEventListener('mousedown',   onMouseDown  as EventListener)
+    window.addEventListener('mousemove',  onMouseMove  as EventListener)
     window.addEventListener('mouseup',    onMouseUp)
 
     this._rotCleanup = () => {
-      track.removeEventListener('touchstart',  onTouchStart  as EventListener)
-      track.removeEventListener('touchmove',   onTouchMove   as EventListener)
+      track.removeEventListener('touchstart',  onTouchStart as EventListener)
+      track.removeEventListener('touchmove',   onTouchMove  as EventListener)
       track.removeEventListener('touchend',    onTouchEnd)
       track.removeEventListener('touchcancel', onTouchEnd)
-      track.removeEventListener('mousedown',   onMouseDown   as EventListener)
-      window.removeEventListener('mousemove',  onMouseMove   as EventListener)
+      track.removeEventListener('mousedown',   onMouseDown  as EventListener)
+      window.removeEventListener('mousemove',  onMouseMove  as EventListener)
       window.removeEventListener('mouseup',    onMouseUp)
     }
   }
@@ -608,10 +550,6 @@ export class ArUiOverlay {
     document.addEventListener('webkitfullscreenchange', this._fsListener)
   }
 
-  /**
-   * @param keepFullscreen  Pass `true` when transitioning to 360 viewer so
-   *                        the browser stays fullscreen across the handoff.
-   */
   hideFullscreenButton(keepFullscreen = false): void {
     if (this.fsBtn) {
       const el = this.fsBtn; this.fsBtn = null

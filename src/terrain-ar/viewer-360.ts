@@ -161,7 +161,7 @@ export class Viewer360 {
     const gyroOk = await this._requestGyroPermission()
     this._buildOverlay(name, registry, gyroOk, onClose)
     this._initRenderer()
-    this._startResizeHandler()   // ← must be after _initRenderer
+    this._startResizeHandler()
     if (gyroOk) this._startGyro()
     else         this._startTouchDrag()
     this._startLoop()
@@ -205,20 +205,20 @@ export class Viewer360 {
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Mapa AR
+          AR Map
         </button>
         <span id="v360-title">${this._fmt(name)}</span>
       </div>
-      ${!gyroOk ? `<div id="v360-gyro-badge">Modo táctil</div>` : ''}
+      ${!gyroOk ? `<div id="v360-gyro-badge">Touch mode</div>` : ''}
       ${count > 1 ? `
-        <button class="v360-nav" id="v360-prev" aria-label="Anterior">
+        <button class="v360-nav" id="v360-prev" aria-label="Previous">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2.2"
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
         </button>
-        <button class="v360-nav" id="v360-next" aria-label="Siguiente">
+        <button class="v360-nav" id="v360-next" aria-label="Next">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2.2"
                stroke-linecap="round" stroke-linejoin="round">
@@ -311,9 +311,6 @@ export class Viewer360 {
   }
 
   // ── Resize handler ────────────────────────────────────────────────────────
-  // When the user rotates the device, window.innerWidth/Height swap.
-  // We must update both the renderer size and the camera aspect ratio,
-  // otherwise the canvas stays at the old dimensions and the rest is black.
 
   private _startResizeHandler(): void {
     this._resizeHandler = () => {
