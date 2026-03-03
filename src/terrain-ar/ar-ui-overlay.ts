@@ -1,5 +1,5 @@
 /**
- * ArUiOverlay — v6
+ * ArUiOverlay — v7
  *
  * ════════════════════════════════════════════════════════════
  * DEFINITIVE ORIENTATION FIX
@@ -45,31 +45,23 @@ export function installViewportFix(): void {
   _viewportFixInstalled = true
 
   const resetViewport = () => {
-    // Find or create the <meta name="viewport"> tag
     let meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]')
     if (!meta) {
       meta = document.createElement('meta')
       meta.name = 'viewport'
       document.head.appendChild(meta)
     }
-
-    // Step 1 — force Chrome to blow away its stale layout-viewport cache
     meta.content = 'width=10000, initial-scale=1, minimum-scale=1, maximum-scale=1'
-
-    // Step 2 — one rAF later: restore the correct value
     requestAnimationFrame(() => {
       meta!.content =
         'width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1'
     })
   }
 
-  // Delay gives the browser time to settle window.innerWidth / Height
   const onOrientChange = () => setTimeout(resetViewport, 200)
 
   window.addEventListener('orientationchange', onOrientChange, {passive: true})
-  // resize is a fallback (fires later than orientationchange on most devices)
   window.addEventListener('resize', onOrientChange, {passive: true})
-  // Modern Screen Orientation API if available
   try { screen.orientation?.addEventListener('change', onOrientChange) } catch (_) {}
 }
 
@@ -147,7 +139,7 @@ const injectStyles = (() => {
       #ar-fullscreen-btn.ar-fs-visible { opacity:1; pointer-events:all; }
       #ar-fullscreen-btn:active { background:var(--ar-surface-act); }
 
-      /* ── Bottom bar ─────────────────────────────────────────────────── */
+      /* ── Bottom bar — column layout, two rows ───────────────────────── */
       #ar-bottom-bar {
         position: fixed;
         bottom: var(--ar-bottom);
@@ -155,6 +147,7 @@ const injectStyles = (() => {
         right:  var(--ar-edge);
         z-index: 9998;
         display: flex;
+        flex-direction: column;
         align-items: stretch;
         gap: var(--ar-gap);
         opacity: 0;
@@ -162,6 +155,19 @@ const injectStyles = (() => {
         pointer-events: none;
       }
       #ar-bottom-bar.ar-bar-visible { opacity:1; pointer-events:all; }
+
+      /* Top row: rotation track + reset button */
+      #ar-bar-row-top {
+        display: flex;
+        align-items: stretch;
+        gap: var(--ar-gap);
+      }
+
+      /* Bottom row: height track full-width */
+      #ar-bar-row-height {
+        display: flex;
+        align-items: stretch;
+      }
 
       /* ── Rotation track  (flex:3 → ≈75 %) ──────────────────────────── */
       #ar-rot-track {
@@ -175,27 +181,67 @@ const injectStyles = (() => {
         cursor:ew-resize; touch-action:none; user-select:none;
         -webkit-tap-highlight-color:transparent;
       }
-      .ar-rot-line {
+
+      /* ── Height track (flex:1 → full row width) ─────────────────────── */
+      #ar-height-track {
+        flex: 1; min-width: 0;
+        height: var(--ar-h);
+        background: var(--ar-surface);
+        border-radius: var(--ar-pill);
+        box-shadow: var(--ar-shadow);
+        display:flex; align-items:center; justify-content:center;
+        position:relative; overflow:visible;
+        cursor:ew-resize; touch-action:none; user-select:none;
+        -webkit-tap-highlight-color:transparent;
+      }
+
+      /* Shared track internals */
+      .ar-track-line {
         position:absolute; left:52px; right:52px; height:2px;
         background:linear-gradient(90deg,
           transparent 0%, var(--ar-accent-soft) 20%,
           rgba(74,184,216,.30) 50%, var(--ar-accent-soft) 80%, transparent 100%);
         border-radius:1px; pointer-events:none;
       }
-      .ar-rot-chevron {
+      .ar-track-chevron {
         position:absolute; top:50%; transform:translateY(-50%);
         display:flex; align-items:center;
         color:rgba(74,184,216,.40); pointer-events:none;
       }
-      .ar-rot-chevron-left  { left:14px; }
-      .ar-rot-chevron-right { right:14px; }
-      #ar-rot-thumb {
+      .ar-track-chevron-left  { left:14px; }
+      .ar-track-chevron-right { right:14px; }
+      .ar-track-thumb {
         position:relative; z-index:1;
         width:32px; height:32px; border-radius:50%;
         background:var(--ar-accent);
         box-shadow:0 2px 10px var(--ar-accent-glow);
         flex-shrink:0; will-change:transform; pointer-events:none;
         transition:box-shadow .15s;
+      }
+      #ar-rot-track:active    .ar-track-thumb,
+      #ar-height-track:active .ar-track-thumb {
+        box-shadow:0 2px 18px var(--ar-accent-glow), 0 0 0 6px var(--ar-accent-soft);
+      }
+      .ar-track-label {
+        position:absolute; bottom:-18px; left:50%; transform:translateX(-50%);
+        font-family:var(--ar-font); font-size:9px; font-weight:600;
+        letter-spacing:.22em; text-transform:uppercase;
+        color:var(--ar-text-label); white-space:nowrap; pointer-events:none;
+      }
+
+      /* Keep old selectors as aliases so nothing breaks */
+      .ar-rot-line    { position:absolute; left:52px; right:52px; height:2px;
+        background:linear-gradient(90deg,transparent 0%,var(--ar-accent-soft) 20%,
+        rgba(74,184,216,.30) 50%,var(--ar-accent-soft) 80%,transparent 100%);
+        border-radius:1px; pointer-events:none; }
+      .ar-rot-chevron { position:absolute; top:50%; transform:translateY(-50%);
+        display:flex; align-items:center; color:rgba(74,184,216,.40); pointer-events:none; }
+      .ar-rot-chevron-left  { left:14px; }
+      .ar-rot-chevron-right { right:14px; }
+      #ar-rot-thumb {
+        position:relative; z-index:1; width:32px; height:32px; border-radius:50%;
+        background:var(--ar-accent); box-shadow:0 2px 10px var(--ar-accent-glow);
+        flex-shrink:0; will-change:transform; pointer-events:none; transition:box-shadow .15s;
       }
       #ar-rot-track:active #ar-rot-thumb {
         box-shadow:0 2px 18px var(--ar-accent-glow), 0 0 0 6px var(--ar-accent-soft);
@@ -225,10 +271,10 @@ const injectStyles = (() => {
       #ar-reset-btn:active { background:var(--ar-surface-act); }
       #ar-reset-btn svg { flex-shrink:0; color:var(--ar-accent); }
 
-      /* ── Gesture hints — left-anchored ──────────────────────────────── */
+      /* ── Gesture hints — pushed above both bars ──────────────────────── */
       #ar-gesture-hint {
         position:fixed;
-        bottom:calc(var(--ar-bottom) + var(--ar-h) + 22px);
+        bottom:calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) + 22px);
         left:var(--ar-edge);
         z-index:9998;
         display:flex; flex-direction:column;
@@ -269,6 +315,10 @@ const injectStyles = (() => {
         #ar-reset-btn     { font-size:10px; gap:5px; }
         #ar-reset-btn svg { width:12px; height:12px; }
         .ar-rot-label     { font-size:8px; }
+        .ar-track-label   { font-size:8px; }
+        #ar-gesture-hint  {
+          bottom:calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) + 18px);
+        }
       }
       @media (orientation:landscape) and (min-width:768px) {
         :root { --ar-h:46px; --ar-edge:28px; }
@@ -313,46 +363,68 @@ const ICON_COMPRESS = `<svg width="16" height="16" viewBox="0 0 24 24" fill="non
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ArUiOverlay {
-  private loader:      HTMLElement | null = null
-  private fsBtn:       HTMLElement | null = null
-  private gestureHint: HTMLElement | null = null
-  private bottomBar:   HTMLElement | null = null
-  private rotTrack:    HTMLElement | null = null
-  private rotThumb:    HTMLElement | null = null
-  private resetBtn:    HTMLElement | null = null
+  private loader:       HTMLElement | null = null
+  private fsBtn:        HTMLElement | null = null
+  private gestureHint:  HTMLElement | null = null
+  private bottomBar:    HTMLElement | null = null
+  private rowTop:       HTMLElement | null = null
+  private rowHeight:    HTMLElement | null = null
+  private rotTrack:     HTMLElement | null = null
+  private rotThumb:     HTMLElement | null = null
+  private resetBtn:     HTMLElement | null = null
+  private heightTrack:  HTMLElement | null = null
+  private heightThumb:  HTMLElement | null = null
 
   private _t1 = 0
   private _t2 = 0
-  private _hintTimer    = 0
-  private _fsListener:  (() => void) | null = null
-  private _rotSpringRAF = 0
-  private _rotCleanup:  (() => void) | null = null
+  private _hintTimer      = 0
+  private _fsListener:    (() => void) | null = null
+  private _rotSpringRAF   = 0
+  private _rotCleanup:    (() => void) | null = null
+  private _heightSpringRAF = 0
+  private _heightCleanup: (() => void) | null = null
 
   // ── Bottom bar lifecycle ──────────────────────────────────────────────────
 
-  private _ensureBottomBar(): HTMLElement {
-    if (this.bottomBar) return this.bottomBar
+  private _ensureBottomBar(): { bar: HTMLElement; rowTop: HTMLElement; rowHeight: HTMLElement } {
+    if (this.bottomBar && this.rowTop && this.rowHeight) {
+      return { bar: this.bottomBar, rowTop: this.rowTop, rowHeight: this.rowHeight }
+    }
     injectStyles()
     const bar = document.createElement('div')
     bar.id = 'ar-bottom-bar'
+    bar.innerHTML = `
+      <div id="ar-bar-row-top"></div>
+      <div id="ar-bar-row-height"></div>
+    `
     document.body.appendChild(bar)
-    this.bottomBar = bar
-    return bar
+    this.bottomBar  = bar
+    this.rowTop     = bar.querySelector<HTMLElement>('#ar-bar-row-top')!
+    this.rowHeight  = bar.querySelector<HTMLElement>('#ar-bar-row-height')!
+    return { bar, rowTop: this.rowTop, rowHeight: this.rowHeight }
   }
 
   private _showBottomBar(): void {
-    requestAnimationFrame(() => this._ensureBottomBar().classList.add('ar-bar-visible'))
+    requestAnimationFrame(() => this._ensureBottomBar().bar.classList.add('ar-bar-visible'))
   }
 
   private _hideBottomBar(): void {
     if (!this.bottomBar) return
     const el = this.bottomBar
-    this.bottomBar = null
-    this.rotTrack  = null
-    this.rotThumb  = null
-    this.resetBtn  = null
+    this.bottomBar   = null
+    this.rowTop      = null
+    this.rowHeight   = null
+    this.rotTrack    = null
+    this.rotThumb    = null
+    this.resetBtn    = null
+    this.heightTrack = null
+    this.heightThumb = null
     el.classList.remove('ar-bar-visible')
     setTimeout(() => el.remove(), 320)
+  }
+
+  private _checkHideBar(): void {
+    if (!this.rotTrack && !this.resetBtn && !this.heightTrack) this._hideBottomBar()
   }
 
   // ── Loader ────────────────────────────────────────────────────────────────
@@ -405,7 +477,7 @@ export class ArUiOverlay {
   // ── Reset button ──────────────────────────────────────────────────────────
 
   showResetButton(onReset: () => void): void {
-    const bar = this._ensureBottomBar()
+    const { rowTop } = this._ensureBottomBar()
     if (this.resetBtn) return
     const btn = document.createElement('button')
     btn.id = 'ar-reset-btn'
@@ -417,7 +489,7 @@ export class ArUiOverlay {
         <path d="M3.51 15a9 9 0 1 0 .49-5"/>
       </svg>
       Reset`
-    bar.appendChild(btn)
+    rowTop.appendChild(btn)
     this.resetBtn = btn
     btn.addEventListener('click', () => { this.hideResetButton(); onReset() })
   }
@@ -425,13 +497,13 @@ export class ArUiOverlay {
   hideResetButton(): void {
     if (!this.resetBtn) return
     this.resetBtn.remove(); this.resetBtn = null
-    if (!this.rotTrack) this._hideBottomBar()
+    this._checkHideBar()
   }
 
   // ── Rotation track ────────────────────────────────────────────────────────
 
   showRotationBar(onRotate: (deltaRad: number) => void): void {
-    const bar = this._ensureBottomBar()
+    const { rowTop } = this._ensureBottomBar()
     if (this.rotTrack) return
 
     const track = document.createElement('div')
@@ -455,8 +527,8 @@ export class ArUiOverlay {
       <div id="ar-rot-thumb"></div>
       <span class="ar-rot-label">Rotate</span>`
 
-    if (bar.firstChild) bar.insertBefore(track, bar.firstChild)
-    else                bar.appendChild(track)
+    if (rowTop.firstChild) rowTop.insertBefore(track, rowTop.firstChild)
+    else                   rowTop.appendChild(track)
 
     this.rotTrack = track
     this.rotThumb = track.querySelector<HTMLElement>('#ar-rot-thumb')!
@@ -527,7 +599,113 @@ export class ArUiOverlay {
     this._rotCleanup?.(); this._rotCleanup = null
     this.rotThumb = null
     if (this.rotTrack) { this.rotTrack.remove(); this.rotTrack = null }
-    if (!this.resetBtn) this._hideBottomBar()
+    this._checkHideBar()
+  }
+
+  // ── Height track ──────────────────────────────────────────────────────────
+  /**
+   * Displays a horizontal drag bar whose thumb springs back to centre.
+   * Dragging RIGHT raises the model; dragging LEFT lowers it (clamped at floor).
+   * `onHeight(delta)` receives a signed world-unit delta to apply to the model Y.
+   */
+  showHeightBar(onHeight: (delta: number) => void): void {
+    const { rowHeight } = this._ensureBottomBar()
+    if (this.heightTrack) return
+
+    const track = document.createElement('div')
+    track.id = 'ar-height-track'
+    track.innerHTML = `
+      <div class="ar-track-line"></div>
+      <div class="ar-track-chevron ar-track-chevron-left">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="18 15 12 9 6 15"/>
+        </svg>
+      </div>
+      <div class="ar-track-chevron ar-track-chevron-right">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+      <div id="ar-height-thumb" class="ar-track-thumb"></div>
+      <span class="ar-track-label">Height</span>`
+
+    rowHeight.appendChild(track)
+    this.heightTrack = track
+    this.heightThumb = track.querySelector<HTMLElement>('#ar-height-thumb')!
+    this._showBottomBar()
+
+    // pixels → world units (tweak to taste)
+    const SENSITIVITY = 0.012
+    let thumbPos = 0, dragging = false, lastX = 0
+
+    const maxTravel  = () => Math.max(24, (track.clientWidth / 2) - 28)
+    const setThumb   = (px: number) => {
+      thumbPos = Math.max(-maxTravel(), Math.min(maxTravel(), px))
+      if (this.heightThumb) this.heightThumb.style.transform = `translateX(${thumbPos}px)`
+    }
+    const stopSpring = () => cancelAnimationFrame(this._heightSpringRAF)
+    const springBack = () => {
+      stopSpring()
+      const step = () => {
+        thumbPos *= 0.72
+        if (this.heightThumb) this.heightThumb.style.transform = `translateX(${thumbPos}px)`
+        if (Math.abs(thumbPos) > 0.5) this._heightSpringRAF = requestAnimationFrame(step)
+        else { thumbPos = 0; if (this.heightThumb) this.heightThumb.style.transform = 'translateX(0)' }
+      }
+      this._heightSpringRAF = requestAnimationFrame(step)
+    }
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return
+      e.stopPropagation(); dragging = true; lastX = e.touches[0].clientX; stopSpring()
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (!dragging || e.touches.length !== 1) return
+      e.preventDefault(); e.stopPropagation()
+      const dx = e.touches[0].clientX - lastX; lastX = e.touches[0].clientX
+      setThumb(thumbPos + dx)
+      // right = positive delta (up), left = negative delta (down)
+      if (Math.abs(dx) > 0.2) onHeight(dx * SENSITIVITY)
+    }
+    const onTouchEnd   = () => { dragging = false; springBack() }
+    const onMouseDown  = (e: MouseEvent) => { dragging = true; lastX = e.clientX; stopSpring(); e.preventDefault() }
+    const onMouseMove  = (e: MouseEvent) => {
+      if (!dragging) return
+      const dx = e.clientX - lastX; lastX = e.clientX
+      setThumb(thumbPos + dx)
+      if (Math.abs(dx) > 0.2) onHeight(dx * SENSITIVITY)
+    }
+    const onMouseUp = () => { dragging = false; springBack() }
+
+    track.addEventListener('touchstart',  onTouchStart as EventListener, {passive: false})
+    track.addEventListener('touchmove',   onTouchMove  as EventListener, {passive: false})
+    track.addEventListener('touchend',    onTouchEnd,                     {passive: true})
+    track.addEventListener('touchcancel', onTouchEnd,                     {passive: true})
+    track.addEventListener('mousedown',   onMouseDown  as EventListener)
+    window.addEventListener('mousemove',  onMouseMove  as EventListener)
+    window.addEventListener('mouseup',    onMouseUp)
+
+    this._heightCleanup = () => {
+      track.removeEventListener('touchstart',  onTouchStart as EventListener)
+      track.removeEventListener('touchmove',   onTouchMove  as EventListener)
+      track.removeEventListener('touchend',    onTouchEnd)
+      track.removeEventListener('touchcancel', onTouchEnd)
+      track.removeEventListener('mousedown',   onMouseDown  as EventListener)
+      window.removeEventListener('mousemove',  onMouseMove  as EventListener)
+      window.removeEventListener('mouseup',    onMouseUp)
+    }
+  }
+
+  hideHeightBar(): void {
+    cancelAnimationFrame(this._heightSpringRAF)
+    this._heightCleanup?.(); this._heightCleanup = null
+    this.heightThumb = null
+    if (this.heightTrack) { this.heightTrack.remove(); this.heightTrack = null }
+    this._checkHideBar()
   }
 
   // ── Fullscreen button ─────────────────────────────────────────────────────

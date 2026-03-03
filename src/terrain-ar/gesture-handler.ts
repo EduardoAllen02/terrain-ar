@@ -12,7 +12,7 @@
 const DEPTH_SENSITIVITY      = 0.005
 const HORIZONTAL_SENSITIVITY = 0.005
 const SCALE_MIN              = 0.02
-const SCALE_MAX              = 5.0
+const SCALE_MAX              = Infinity   // ← no upper limit; user can scale as large as desired
 const MIN_SPREAD             = 10
 
 export class GestureHandler {
@@ -80,7 +80,7 @@ export class GestureHandler {
       const b = touches.find(t => t.identifier === this.tf!.idB) ?? touches[1]
       const spread = this._spread(a, b)
       if (spread > MIN_SPREAD && this.tf.initSpread > MIN_SPREAD) {
-        const s = Math.max(SCALE_MIN, Math.min(SCALE_MAX, this.tf.baseScale * (spread / this.tf.initSpread)))
+        const s = Math.max(SCALE_MIN, this.tf.baseScale * (spread / this.tf.initSpread))
         this._setScale(s)
       }
       this.tf.prevSpread = spread

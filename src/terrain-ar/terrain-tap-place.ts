@@ -8,9 +8,6 @@ import {Viewer360}                   from './viewer-360'
 import {checkArSupport, checkCameraAccess} from './device-check'
 
 // ── Install viewport-orientation fix ASAP (before any component mounts) ─────
-// Resets <meta name="viewport"> on every orientationchange so Chrome Android
-// re-evaluates the layout-viewport width. This is the canonical fix for the
-// "UI stays small / zoomed-out after rotating back to portrait" bug.
 installViewportFix()
 
 const CAMERA_OFFSET  = 0.6
@@ -76,6 +73,13 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
+    // ── Height tracking ───────────────────────────────────────────────────
+    // `placedY`     = world Y set at placement time (floor reference)
+    // `heightOffset` = additional height above floor added by the height bar
+    //                  clamped to [0, +∞) so the model never sinks below floor
+    let placedY      = 0
+    let heightOffset = 0
+
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
@@ -89,6 +93,7 @@ ecs.registerComponent({
         gestures?.detach()
         ui.hideResetButton()
         ui.hideRotationBar()
+        ui.hideHeightBar()
         ui.hideGestureHint()
         ui.hideFullscreenButton(/* keepFullscreen */ wasFs)
 
@@ -134,6 +139,7 @@ ecs.registerComponent({
       .onEnter(() => {
         ui.hideLoader(); hideModel()
         dataAttribute.cursor(eid).placed = false
+        heightOffset = 0
       })
       .onTick(() => {
         const hits       = world.raycastFrom(eid)
@@ -158,6 +164,11 @@ ecs.registerComponent({
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
+        // Capture the floor Y established during scanning
+        const initPos = world.transform.getWorldPosition(schema.terrainEntity)
+        placedY      = initPos.y
+        heightOffset = 0
+
         boards.dispose(world.three.scene)
         const obj = getTerrainObj()
         if (obj) {
@@ -170,6 +181,14 @@ ecs.registerComponent({
           world.transform.rotateSelf(schema.terrainEntity,
             {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
         })
+
+        ui.showHeightBar((delta: number) => {
+          // delta > 0 → raise, delta < 0 → lower; clamp so model never drops below floor
+          heightOffset = Math.max(0, heightOffset + delta)
+          const pos = world.transform.getWorldPosition(schema.terrainEntity)
+          world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
+        })
+
         ui.showResetButton(() => seamlessReload())
         ui.showFullscreenButton()
         ui.showGestureHint()
@@ -185,6 +204,7 @@ ecs.registerComponent({
         boards.dispose(world.three.scene)
         ui.hideResetButton()
         ui.hideRotationBar()
+        ui.hideHeightBar()
         ui.hideFullscreenButton()
         ui.hideGestureHint()
       })
