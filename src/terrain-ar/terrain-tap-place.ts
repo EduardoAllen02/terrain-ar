@@ -11,7 +11,7 @@ import {checkArSupport, checkCameraAccess} from './device-check'
 installViewportFix()
 
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.28
+const INITIAL_SCALE  = 0.45
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
