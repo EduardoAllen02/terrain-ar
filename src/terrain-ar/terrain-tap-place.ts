@@ -1,19 +1,31 @@
 import * as ecs from '@8thwall/ecs'
-import {GestureHandler}              from './gesture-handler'
-import {ArUiOverlay, isFullscreen,
-        installViewportFix}          from './ar-ui-overlay'
-import {BillboardManager}            from './billboard-manager'
-import {ExperienceRegistry}          from './experience-registry'
-import {Viewer360}                   from './viewer-360'
-import {checkArSupport, checkCameraAccess} from './device-check'
+import {GestureHandler}                                   from './gesture-handler'
+import {ArUiOverlay, requestFullscreenNow,
+        maintainFullscreen, installViewportFix}           from './ar-ui-overlay'
+import {BillboardManager}                                 from './billboard-manager'
+import {ExperienceRegistry}                               from './experience-registry'
+import {Viewer360}                                        from './viewer-360'
+import {checkArSupport, checkCameraAccess}                from './device-check'
 
-// ── Install viewport-orientation fix ASAP (before any component mounts) ─────
+// ── Install orientation fix ASAP ─────────────────────────────────────────────
 installViewportFix()
 
+// ── Auto-fullscreen ───────────────────────────────────────────────────────────
+// Browsers require a user gesture before entering fullscreen.
+// We listen for the very first touch/click on the page and request fullscreen
+// at that moment. After that, maintainFullscreen() keeps us in fullscreen
+// for the rest of the session (re-entering if the user or the OS exits it).
+maintainFullscreen()
+window.addEventListener('touchstart', () => requestFullscreenNow(), {once: true, passive: true})
+window.addEventListener('click',      () => requestFullscreenNow(), {once: true})
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.45
+const INITIAL_SCALE  = 0.28   // ← default model size; increase to make it larger
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function isModelReady(world: any, terrainEid: any): boolean {
   const obj = world.three.entityToObject.get(terrainEid)
@@ -73,32 +85,29 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
-    // ── Height tracking ───────────────────────────────────────────────────
-    // `placedY`     = world Y set at placement time (floor reference)
-    // `heightOffset` = additional height above floor added by the height bar
-    //                  clamped to [0, +∞) so the model never sinks below floor
+    // Height tracking
     let placedY      = 0
     let heightOffset = 0
 
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
-    const boards   = new BillboardManager(THREE, {
+
+    const boards = new BillboardManager(THREE, {
       baseSize: 0.4, verticalOffset: 0.025, debug: false,
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
 
-        const wasFs = isFullscreen()
+        // Hide AR controls; fullscreen is maintained automatically
         gestures?.detach()
         ui.hideResetButton()
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
-        ui.hideFullscreenButton(/* keepFullscreen */ wasFs)
+        // Keep the X close button visible during 360 so the user can always exit
 
         viewer.open(name, registry, () => seamlessReload())
-        setTimeout(() => ui.showFullscreenButton(), 120)
       },
     })
 
@@ -115,6 +124,8 @@ ecs.registerComponent({
         {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
     }
 
+    // ── loading ───────────────────────────────────────────────────────────
+
     ecs.defineState('loading').initial()
       .onEnter(() => {
         checkArSupport()
@@ -123,6 +134,8 @@ ecs.registerComponent({
         if (ecs.Hidden.has(world, schema.terrainEntity))
           ecs.Hidden.remove(world, schema.terrainEntity)
         ui.showLoader()
+        // Show X close button from the very first screen
+        ui.showCloseButton()
       })
       .onTick(() => {
         if (isModelReady(world, schema.terrainEntity)) {
@@ -135,9 +148,12 @@ ecs.registerComponent({
       })
       .onTrigger(doReady, 'scanning')
 
+    // ── scanning ──────────────────────────────────────────────────────────
+
     ecs.defineState('scanning')
       .onEnter(() => {
-        ui.hideLoader(); hideModel()
+        ui.hideLoader()
+        hideModel()
         dataAttribute.cursor(eid).placed = false
         heightOffset = 0
       })
@@ -158,13 +174,14 @@ ecs.registerComponent({
       })
       .onTrigger(doPlaced, 'placed')
 
+    // ── placed ────────────────────────────────────────────────────────────
+
     ecs.defineState('placed')
       .onEnter(async () => {
         gestures?.detach()
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        // Capture the floor Y established during scanning
         const initPos = world.transform.getWorldPosition(schema.terrainEntity)
         placedY      = initPos.y
         heightOffset = 0
@@ -183,14 +200,12 @@ ecs.registerComponent({
         })
 
         ui.showHeightBar((delta: number) => {
-          // delta > 0 → raise, delta < 0 → lower; clamp so model never drops below floor
           heightOffset = Math.max(0, heightOffset + delta)
           const pos = world.transform.getWorldPosition(schema.terrainEntity)
           world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
         })
 
         ui.showResetButton(() => seamlessReload())
-        ui.showFullscreenButton()
         ui.showGestureHint()
         dataAttribute.cursor(eid).placed = true
       })
@@ -205,8 +220,8 @@ ecs.registerComponent({
         ui.hideResetButton()
         ui.hideRotationBar()
         ui.hideHeightBar()
-        ui.hideFullscreenButton()
         ui.hideGestureHint()
+        // Note: closeButton is intentionally kept visible through all states
       })
   },
 

@@ -1,10 +1,28 @@
 /**
- * ArUiOverlay — v8
+ * ArUiOverlay — v9
+ *
+ * Changes vs v8:
+ *  • Fullscreen button REMOVED — fullscreen is managed automatically.
+ *  • `requestFullscreenNow()` exported — call once on the first user gesture.
+ *  • `maintainFullscreen()` exported — re-enters fullscreen if it is lost
+ *    (e.g. after a 360 viewer closes). Attach once at app startup.
+ *  • X close button added (top-right corner). Tries window.close(); falls
+ *    back to redirect. Set CLOSE_REDIRECT_URL below.
  *
  * ════════════════════════════════════════════════════════════
- * DEFINITIVE ORIENTATION FIX  (unchanged from v7)
+ * DEFINITIVE ORIENTATION FIX  (unchanged)
  * ════════════════════════════════════════════════════════════
  */
+
+// ─── ⚙️  Client config ────────────────────────────────────────────────────────
+/**
+ * URL to navigate to when the X button is tapped and window.close() fails
+ * (which is expected when the tab was opened by the user, not by script).
+ * Replace with the URL the client provides.
+ */
+const CLOSE_REDIRECT_URL = 'https://REPLACE_WITH_CLIENT_URL'
+
+// ─── Viewport orientation fix ────────────────────────────────────────────────
 
 let _viewportFixInstalled = false
 export function installViewportFix(): void {
@@ -26,6 +44,46 @@ export function installViewportFix(): void {
   window.addEventListener('orientationchange', onOrientChange, {passive: true})
   window.addEventListener('resize',            onOrientChange, {passive: true})
   try { screen.orientation?.addEventListener('change', onOrientChange) } catch (_) {}
+}
+
+// ─── Fullscreen helpers (internal + exported utilities) ───────────────────────
+
+function _enterFs(): void {
+  const el = document.documentElement as any
+  ;(el.requestFullscreen ?? el.webkitRequestFullscreen ?? el.mozRequestFullScreen)?.call(el)
+    ?.catch?.(() => {/* silently ignore if already fullscreen or permission denied */})
+}
+
+/** True when any fullscreen element is active. */
+export function isFullscreen(): boolean {
+  const doc = document as any
+  return !!(doc.fullscreenElement ?? doc.webkitFullscreenElement ?? doc.mozFullScreenElement)
+}
+
+/**
+ * Request fullscreen immediately (must be called from a user-gesture handler).
+ * Safe to call multiple times; no-ops when already fullscreen.
+ */
+export function requestFullscreenNow(): void {
+  if (!isFullscreen()) _enterFs()
+}
+
+/**
+ * Install a persistent listener that re-enters fullscreen whenever it is
+ * exited unexpectedly (e.g. user presses Escape, or a 360 overlay closes).
+ * Call once at app startup — harmless to call multiple times.
+ */
+let _maintainInstalled = false
+export function maintainFullscreen(): void {
+  if (_maintainInstalled) return
+  _maintainInstalled = true
+  const onFsChange = () => {
+    // Small delay so the browser settles before we try to re-enter
+    if (!isFullscreen()) setTimeout(_enterFs, 120)
+  }
+  document.addEventListener('fullscreenchange',       onFsChange)
+  document.addEventListener('webkitfullscreenchange', onFsChange)
+  document.addEventListener('mozfullscreenchange',    onFsChange)
 }
 
 // ─── CSS ─────────────────────────────────────────────────────────────────────
@@ -51,8 +109,8 @@ const injectStyles = (() => {
         --ar-edge:        16px;
         --ar-bottom:      20px;
         --ar-pill:        100px;
-        --ar-h:           40px;    /* slimmer bars */
-        --ar-thumb:       26px;    /* thumb diameter */
+        --ar-h:           40px;
+        --ar-thumb:       26px;
         --ar-font: 'Helvetica Neue', Helvetica, Arial, sans-serif;
       }
 
@@ -89,8 +147,8 @@ const injectStyles = (() => {
       }
       @keyframes ar-label-pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
 
-      /* ── Fullscreen button ──────────────────────────────────────────── */
-      #ar-fullscreen-btn {
+      /* ── X Close button ─────────────────────────────────────────────── */
+      #ar-close-btn {
         position:fixed; top:18px; right:18px; z-index:9998;
         width:38px; height:38px;
         display:flex; align-items:center; justify-content:center;
@@ -100,11 +158,11 @@ const injectStyles = (() => {
         transition:background .2s, opacity .25s;
         opacity:0; pointer-events:none; color:var(--ar-accent);
       }
-      #ar-fullscreen-btn.ar-fs-visible { opacity:1; pointer-events:all; }
-      #ar-fullscreen-btn:active { background:var(--ar-surface-act); }
+      #ar-close-btn.ar-close-visible { opacity:1; pointer-events:all; }
+      #ar-close-btn:active { background:var(--ar-surface-act); }
 
       /* ══════════════════════════════════════════════════════════════════
-         BOTTOM BAR — centred, two rows, no external labels
+         BOTTOM BAR — centred, two rows
       ══════════════════════════════════════════════════════════════════ */
       #ar-bottom-bar {
         position: fixed;
@@ -124,147 +182,109 @@ const injectStyles = (() => {
       }
       #ar-bottom-bar.ar-bar-visible { opacity:1; pointer-events:all; }
 
-      #ar-bar-row-top {
-        display: flex;
-        align-items: stretch;
-        gap: var(--ar-gap);
-      }
-      #ar-bar-row-height {
-        display: flex;
-        align-items: stretch;
-      }
+      #ar-bar-row-top    { display:flex; align-items:stretch; gap:var(--ar-gap); }
+      #ar-bar-row-height { display:flex; align-items:stretch; }
 
-      /* ── Track shell (shared) ───────────────────────────────────────── */
+      /* ── Track shell ────────────────────────────────────────────────── */
       .ar-track {
         height: var(--ar-h);
         background: var(--ar-surface);
         border-radius: var(--ar-pill);
         box-shadow: var(--ar-shadow);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        position: relative;
-        overflow: hidden;          /* keep everything inside rounded pill */
-        cursor: ew-resize;
-        touch-action: none;
-        user-select: none;
-        -webkit-tap-highlight-color: transparent;
+        display: flex; align-items: center; justify-content: center;
+        position: relative; overflow: hidden;
+        cursor: ew-resize; touch-action: none;
+        user-select: none; -webkit-tap-highlight-color: transparent;
       }
-      /* subtle center line */
       .ar-track::before {
         content: '';
-        position: absolute;
-        left: 44px; right: 44px; height: 1.5px;
+        position: absolute; left: 44px; right: 44px; height: 1.5px;
         background: linear-gradient(90deg,
           transparent 0%, var(--ar-accent-soft) 25%,
           rgba(74,184,216,.20) 50%, var(--ar-accent-soft) 75%, transparent 100%);
         border-radius: 1px; pointer-events: none;
       }
+      #ar-rot-track    { flex:3; min-width:0; }
+      #ar-height-track { flex:1; min-width:0; }
 
-      #ar-rot-track    { flex: 3; min-width: 0; }
-      #ar-height-track { flex: 1; min-width: 0; }
-
-      /* ── Chevrons (clipped by overflow:hidden) ──────────────────────── */
       .ar-track-chevron {
-        position: absolute; top: 50%; transform: translateY(-50%);
-        display: flex; align-items: center;
-        color: rgba(74,184,216,.35); pointer-events: none;
+        position:absolute; top:50%; transform:translateY(-50%);
+        display:flex; align-items:center;
+        color:rgba(74,184,216,.35); pointer-events:none;
       }
-      .ar-track-chevron-left  { left: 10px; }
-      .ar-track-chevron-right { right: 10px; }
+      .ar-track-chevron-left  { left:10px; }
+      .ar-track-chevron-right { right:10px; }
 
-      /* ── Label — inside the pill, right edge, always visible, no overlap */
       .ar-track-label {
-        position: absolute;
-        right: 26px;
-        font-family: var(--ar-font);
-        font-size: 9px; font-weight: 700;
-        letter-spacing: .20em; text-transform: uppercase;
-        color: var(--ar-text-label);
-        white-space: nowrap; pointer-events: none;
-        /* subtle fade so thumb sliding over it looks intentional */
-        opacity: 0.85;
+        position:absolute; right:26px;
+        font-family:var(--ar-font); font-size:9px; font-weight:700;
+        letter-spacing:.20em; text-transform:uppercase;
+        color:var(--ar-text-label); white-space:nowrap; pointer-events:none;
+        opacity:.85;
       }
 
-      /* ── Thumb ──────────────────────────────────────────────────────── */
       .ar-track-thumb {
-        position: relative; z-index: 2;
-        width: var(--ar-thumb); height: var(--ar-thumb);
-        border-radius: 50%;
-        background: var(--ar-accent);
-        box-shadow: 0 2px 8px var(--ar-accent-glow);
-        flex-shrink: 0; will-change: transform; pointer-events: none;
-        transition: box-shadow .15s;
+        position:relative; z-index:2;
+        width:var(--ar-thumb); height:var(--ar-thumb); border-radius:50%;
+        background:var(--ar-accent);
+        box-shadow:0 2px 8px var(--ar-accent-glow);
+        flex-shrink:0; will-change:transform; pointer-events:none;
+        transition:box-shadow .15s;
       }
       .ar-track:active .ar-track-thumb {
-        box-shadow: 0 2px 16px var(--ar-accent-glow), 0 0 0 5px var(--ar-accent-soft);
+        box-shadow:0 2px 16px var(--ar-accent-glow), 0 0 0 5px var(--ar-accent-soft);
       }
 
       /* ── Reset button ───────────────────────────────────────────────── */
       #ar-reset-btn {
-        flex: 1; min-width: 0;
-        height: var(--ar-h);
-        display: flex; align-items: center; justify-content: center; gap: 5px;
-        background: var(--ar-surface); border: none;
-        border-radius: var(--ar-pill);
-        box-shadow: var(--ar-shadow);
-        font-family: var(--ar-font); font-size: 10px; font-weight: 700;
-        letter-spacing: .12em; text-transform: uppercase;
-        color: var(--ar-accent); cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
-        transition: background .2s;
-        white-space: nowrap;
+        flex:1; min-width:0; height:var(--ar-h);
+        display:flex; align-items:center; justify-content:center; gap:5px;
+        background:var(--ar-surface); border:none; border-radius:var(--ar-pill);
+        box-shadow:var(--ar-shadow);
+        font-family:var(--ar-font); font-size:10px; font-weight:700;
+        letter-spacing:.12em; text-transform:uppercase;
+        color:var(--ar-accent); cursor:pointer;
+        -webkit-tap-highlight-color:transparent;
+        transition:background .2s; white-space:nowrap;
       }
-      #ar-reset-btn:active { background: var(--ar-surface-act); }
-      #ar-reset-btn svg    { flex-shrink: 0; color: var(--ar-accent); }
+      #ar-reset-btn:active { background:var(--ar-surface-act); }
+      #ar-reset-btn svg    { flex-shrink:0; color:var(--ar-accent); }
 
       /* ══════════════════════════════════════════════════════════════════
-         GESTURE HINTS — above both bar rows, never overlaps them
+         GESTURE HINTS — always above both bar rows
       ══════════════════════════════════════════════════════════════════ */
       #ar-gesture-hint {
-        position: fixed;
-        bottom: calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) + 16px);
-        left: var(--ar-edge);
-        z-index: 9998;
-        display: flex; flex-direction: column;
-        align-items: flex-start; gap: 8px;
-        pointer-events: none;
-        opacity: 0; transition: opacity .4s ease;
+        position:fixed;
+        bottom:calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) + 16px);
+        left:var(--ar-edge); z-index:9998;
+        display:flex; flex-direction:column; align-items:flex-start; gap:8px;
+        pointer-events:none; opacity:0; transition:opacity .4s ease;
       }
-      #ar-gesture-hint.ar-hint-visible { opacity: 1; }
-      #ar-gesture-hint.ar-hint-hidden  { opacity: 0; }
+      #ar-gesture-hint.ar-hint-visible { opacity:1; }
+      #ar-gesture-hint.ar-hint-hidden  { opacity:0; }
       .ar-hint-row {
-        display: flex; align-items: center; gap: 10px;
-        background: var(--ar-overlay); backdrop-filter: blur(10px);
-        border-radius: var(--ar-pill); padding: 8px 14px;
+        display:flex; align-items:center; gap:10px;
+        background:var(--ar-overlay); backdrop-filter:blur(10px);
+        border-radius:var(--ar-pill); padding:8px 14px;
       }
-      .ar-hint-icon {
-        width: 22px; height: 22px; flex-shrink: 0; color: rgba(255,255,255,.88);
-      }
+      .ar-hint-icon { width:22px; height:22px; flex-shrink:0; color:rgba(255,255,255,.88); }
       .ar-hint-text {
-        font-family: var(--ar-font); font-size: 11px; font-weight: 400;
-        letter-spacing: .08em; color: rgba(255,255,255,.85); white-space: nowrap;
+        font-family:var(--ar-font); font-size:11px; font-weight:400;
+        letter-spacing:.08em; color:rgba(255,255,255,.85); white-space:nowrap;
       }
-      .ar-hint-icon-pinch { animation: ar-pinch 1.8s ease-in-out infinite; }
+      .ar-hint-icon-pinch { animation:ar-pinch 1.8s ease-in-out infinite; }
       @keyframes ar-pinch { 0%,100%{transform:scale(1);opacity:.6} 50%{transform:scale(.80);opacity:1} }
-      .ar-hint-icon-drag  { animation: ar-drag  1.6s ease-in-out infinite; }
+      .ar-hint-icon-drag  { animation:ar-drag  1.6s ease-in-out infinite; }
       @keyframes ar-drag  { 0%,100%{transform:translateX(0);opacity:.5} 50%{transform:translateX(6px);opacity:1} }
 
-      /* ══════════════════════════════════════════════════════════════════
-         LANDSCAPE — phone & tablet
-         Bar already centred via translateX(-50%).
-         Hints stay left-anchored, calculation adapts via custom props.
-      ══════════════════════════════════════════════════════════════════ */
+      /* ── Landscape ──────────────────────────────────────────────────── */
       @media (orientation: landscape) {
         :root {
-          --ar-h:      34px;
-          --ar-thumb:  22px;
-          --ar-bottom: 10px;
-          --ar-edge:   20px;
-          --ar-gap:     6px;
+          --ar-h:34px; --ar-thumb:22px; --ar-bottom:10px;
+          --ar-edge:20px; --ar-gap:6px;
         }
-        #ar-bottom-bar     { max-width: 600px; }
-        #ar-fullscreen-btn { top:10px; right:14px; width:32px; height:32px; }
+        #ar-bottom-bar     { max-width:600px; }
+        #ar-close-btn      { top:10px; right:14px; width:32px; height:32px; }
         .ar-hint-row       { padding:6px 12px; }
         .ar-hint-text      { font-size:10px; }
         .ar-hint-icon      { width:18px; height:18px; }
@@ -272,41 +292,14 @@ const injectStyles = (() => {
         #ar-reset-btn svg  { width:11px; height:11px; }
         .ar-track-label    { font-size:8px; }
       }
-      /* Wide landscape — tablet */
       @media (orientation: landscape) and (min-width: 768px) {
-        :root { --ar-h: 38px; --ar-thumb: 24px; --ar-edge: 28px; }
-        #ar-bottom-bar { max-width: 680px; }
+        :root { --ar-h:38px; --ar-thumb:24px; --ar-edge:28px; }
+        #ar-bottom-bar { max-width:680px; }
       }
     `
     document.head.appendChild(s)
   }
 })()
-
-// ─── Fullscreen helpers ───────────────────────────────────────────────────────
-
-function enterFullscreen(): void {
-  const el = document.documentElement as any
-  ;(el.requestFullscreen ?? el.webkitRequestFullscreen ?? el.mozRequestFullScreen)?.call(el)
-}
-function exitFullscreen(): void {
-  const doc = document as any
-  ;(doc.exitFullscreen ?? doc.webkitExitFullscreen ?? doc.mozCancelFullScreen)?.call(doc)
-}
-export function isFullscreen(): boolean {
-  const doc = document as any
-  return !!(doc.fullscreenElement ?? doc.webkitFullscreenElement ?? doc.mozFullScreenElement)
-}
-
-const ICON_EXPAND = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-  stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-  <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
-  <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
-</svg>`
-const ICON_COMPRESS = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-  stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-  <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/>
-  <line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/>
-</svg>`
 
 // ─── Track builder ────────────────────────────────────────────────────────────
 
@@ -315,35 +308,29 @@ function buildTrack(
   leftSvgPath: string, rightSvgPath: string,
 ): HTMLElement {
   const track = document.createElement('div')
-  track.id = id
-  track.className = 'ar-track'
+  track.id = id; track.className = 'ar-track'
   track.innerHTML = `
     <div class="ar-track-chevron ar-track-chevron-left">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="2.6"
-           stroke-linecap="round" stroke-linejoin="round">
-        ${leftSvgPath}
-      </svg>
+           stroke-linecap="round" stroke-linejoin="round">${leftSvgPath}</svg>
     </div>
     <div class="ar-track-chevron ar-track-chevron-right">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="2.6"
-           stroke-linecap="round" stroke-linejoin="round">
-        ${rightSvgPath}
-      </svg>
+           stroke-linecap="round" stroke-linejoin="round">${rightSvgPath}</svg>
     </div>
     <div id="${thumbId}" class="ar-track-thumb"></div>
     <span class="ar-track-label">${label}</span>`
   return track
 }
 
-// ─── Spring-track interaction (reusable) ──────────────────────────────────────
+// ─── Spring-track interaction ─────────────────────────────────────────────────
 
 function attachTrack(
-  track:      HTMLElement,
-  thumbEl:    HTMLElement,
-  onDelta:    (scaledDx: number) => void,
-  rafHolder:  {id: number},
+  track: HTMLElement, thumbEl: HTMLElement,
+  onDelta: (scaled: number) => void,
+  rafHolder: {id: number},
   sensitivity = 0.011,
 ): () => void {
   let thumbPos = 0, dragging = false, lastX = 0
@@ -409,7 +396,7 @@ function attachTrack(
 
 export class ArUiOverlay {
   private loader:       HTMLElement | null = null
-  private fsBtn:        HTMLElement | null = null
+  private closeBtn:     HTMLElement | null = null   // ← replaces fsBtn
   private gestureHint:  HTMLElement | null = null
   private bottomBar:    HTMLElement | null = null
   private rowTop:       HTMLElement | null = null
@@ -421,7 +408,6 @@ export class ArUiOverlay {
   private heightThumb:  HTMLElement | null = null
 
   private _t1 = 0; private _t2 = 0; private _hintTimer = 0
-  private _fsListener:    (() => void) | null = null
   private _rotRAF         = {id: 0}
   private _heightRAF      = {id: 0}
   private _rotCleanup:    (() => void) | null = null
@@ -507,6 +493,44 @@ export class ArUiOverlay {
     setTimeout(() => el.remove(), 480)
   }
 
+  // ── X Close button ────────────────────────────────────────────────────────
+  /**
+   * Shows a persistent X button in the top-right corner.
+   * Tapping it tries window.close(); if the browser blocks that (tab opened
+   * by the user), it falls back to navigating to CLOSE_REDIRECT_URL.
+   */
+  showCloseButton(): void {
+    injectStyles()
+    if (this.closeBtn) return
+    const btn = document.createElement('button')
+    btn.id = 'ar-close-btn'
+    btn.setAttribute('aria-label', 'Close')
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="2.6"
+      stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6"  y1="6" x2="18" y2="18"/>
+    </svg>`
+    document.body.appendChild(btn)
+    this.closeBtn = btn
+    requestAnimationFrame(() => btn.classList.add('ar-close-visible'))
+
+    btn.addEventListener('click', () => {
+      // Try to close the tab; browsers only honour this when the tab was
+      // opened programmatically (e.g. window.open). If it fails, redirect.
+      window.close()
+      // Give the browser 300 ms to process the close; if we're still here, redirect.
+      setTimeout(() => { window.location.href = CLOSE_REDIRECT_URL }, 300)
+    })
+  }
+
+  hideCloseButton(): void {
+    if (!this.closeBtn) return
+    const el = this.closeBtn; this.closeBtn = null
+    el.classList.remove('ar-close-visible')
+    setTimeout(() => el.remove(), 280)
+  }
+
   // ── Reset button ──────────────────────────────────────────────────────────
 
   showResetButton(onReset: () => void): void {
@@ -566,8 +590,8 @@ export class ArUiOverlay {
     if (this.heightTrack) return
     const track = buildTrack(
       'ar-height-track', 'ar-height-thumb', 'Height',
-      /* left  = lower ↓ */ '<polyline points="6 9 12 15 18 9"/>',
-      /* right = raise ↑ */ '<polyline points="18 15 12 9 6 15"/>',
+      '<polyline points="6 9 12 15 18 9"/>',
+      '<polyline points="18 15 12 9 6 15"/>',
     )
     rowHeight.appendChild(track)
     this.heightTrack = track
@@ -584,40 +608,6 @@ export class ArUiOverlay {
     this._checkHideBar()
   }
 
-  // ── Fullscreen button ─────────────────────────────────────────────────────
-
-  showFullscreenButton(): void {
-    injectStyles()
-    if (this.fsBtn) return
-    const btn = document.createElement('button')
-    btn.id = 'ar-fullscreen-btn'
-    btn.setAttribute('aria-label', 'Toggle fullscreen')
-    btn.innerHTML = isFullscreen() ? ICON_COMPRESS : ICON_EXPAND
-    document.body.appendChild(btn)
-    this.fsBtn = btn
-    requestAnimationFrame(() => btn.classList.add('ar-fs-visible'))
-    btn.addEventListener('click', () => { isFullscreen() ? exitFullscreen() : enterFullscreen() })
-    this._fsListener = () => {
-      if (this.fsBtn) this.fsBtn.innerHTML = isFullscreen() ? ICON_COMPRESS : ICON_EXPAND
-    }
-    document.addEventListener('fullscreenchange',       this._fsListener)
-    document.addEventListener('webkitfullscreenchange', this._fsListener)
-  }
-
-  hideFullscreenButton(keepFullscreen = false): void {
-    if (this.fsBtn) {
-      const el = this.fsBtn; this.fsBtn = null
-      el.classList.remove('ar-fs-visible')
-      setTimeout(() => el.remove(), 280)
-    }
-    if (this._fsListener) {
-      document.removeEventListener('fullscreenchange',       this._fsListener)
-      document.removeEventListener('webkitfullscreenchange', this._fsListener)
-      this._fsListener = null
-    }
-    if (!keepFullscreen && isFullscreen()) exitFullscreen()
-  }
-
   // ── Gesture hints ─────────────────────────────────────────────────────────
 
   showGestureHint(): void {
@@ -630,8 +620,7 @@ export class ArUiOverlay {
         <svg class="ar-hint-icon ar-hint-icon-pinch" viewBox="0 0 32 32" fill="none"
              stroke="currentColor" stroke-width="1.8"
              stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="3"/>
-          <circle cx="22" cy="22" r="3"/>
+          <circle cx="10" cy="10" r="3"/><circle cx="22" cy="22" r="3"/>
           <line x1="10" y1="13" x2="10" y2="24"/>
           <line x1="22" y1="9"  x2="22" y2="19"/>
         </svg>
