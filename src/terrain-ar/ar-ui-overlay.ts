@@ -14,13 +14,13 @@
  * ════════════════════════════════════════════════════════════
  */
 
-// ─── ⚙️  Client config ────────────────────────────────────────────────────────
+// ───  Client config ────────────────────────────────────────────────────────
 /**
  * URL to navigate to when the X button is tapped and window.close() fails
  * (which is expected when the tab was opened by the user, not by script).
  * Replace with the URL the client provides.
  */
-const CLOSE_REDIRECT_URL = 'https://REPLACE_WITH_CLIENT_URL'
+const CLOSE_REDIRECT_URL = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
 
 // ─── Viewport orientation fix ────────────────────────────────────────────────
 
