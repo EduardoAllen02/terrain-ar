@@ -11,19 +11,29 @@ import {checkArSupport, checkCameraAccess}                from './device-check'
 installViewportFix()
 
 // ── Auto-fullscreen ───────────────────────────────────────────────────────────
-// Browsers require a user gesture before entering fullscreen.
-// We listen for the very first touch/click on the page and request fullscreen
-// at that moment. After that, maintainFullscreen() keeps us in fullscreen
-// for the rest of the session (re-entering if the user or the OS exits it).
 maintainFullscreen()
 window.addEventListener('touchstart', () => requestFullscreenNow(), {once: true, passive: true})
 window.addEventListener('click',      () => requestFullscreenNow(), {once: true})
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.28   // ← default model size; increase to make it larger
+const INITIAL_SCALE  = 0.28
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
+
+// ── Hotspots with a custom scale multiplier ───────────────────────────────────
+// Add here any hotspot name (must match the node name after the "hotspot_" prefix)
+// and its size multiplier relative to the global baseSize.
+// Hotspots NOT listed here will use the default baseSize (multiplier = 1.0).
+//
+//   > 1.0  →  larger than the rest
+//   < 1.0  →  smaller than the rest
+//
+const HOTSPOT_SCALE_OVERRIDES: Record<string, number> = {
+  'ZEMOLA':     1,
+  'ERTO':     0.7,
+  'CASSO':  0.7,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -85,7 +95,6 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
-    // Height tracking
     let placedY      = 0
     let heightOffset = 0
 
@@ -94,18 +103,19 @@ ecs.registerComponent({
     const viewer   = new Viewer360(THREE)
 
     const boards = new BillboardManager(THREE, {
-      baseSize: 0.4, verticalOffset: 0.025, debug: false,
+      baseSize:       0.4,
+      verticalOffset: 0.025,
+      debug:          false,
+      scaleOverrides: HOTSPOT_SCALE_OVERRIDES,   // ← per-hotspot size overrides
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
 
-        // Hide AR controls; fullscreen is maintained automatically
         gestures?.detach()
         ui.hideResetButton()
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
-        // Keep the X close button visible during 360 so the user can always exit
 
         viewer.open(name, registry, () => seamlessReload())
       },
@@ -134,7 +144,6 @@ ecs.registerComponent({
         if (ecs.Hidden.has(world, schema.terrainEntity))
           ecs.Hidden.remove(world, schema.terrainEntity)
         ui.showLoader()
-        // Show X close button from the very first screen
         ui.showCloseButton()
       })
       .onTick(() => {
@@ -221,7 +230,6 @@ ecs.registerComponent({
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
-        // Note: closeButton is intentionally kept visible through all states
       })
   },
 

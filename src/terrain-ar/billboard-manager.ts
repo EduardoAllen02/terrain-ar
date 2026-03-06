@@ -3,6 +3,19 @@ export interface BillboardOptions {
   verticalOffset?: number
   debug?:          boolean
   onHotspotTap?:   (name: string) => void
+  /**
+   * Per-hotspot scale multipliers.
+   * Any hotspot whose name appears here will use  baseSize * multiplier
+   * instead of the global baseSize.
+   *
+   * Example:
+   *   scaleOverrides: {
+   *     'PRAMAGGIORE':        1.8,   // 80 % larger than default
+   *     'PASSO_SUOLA':        1.4,
+   *     'FORNI_DI_SOTTO':     0.7,   // 30 % smaller than default
+   *   }
+   */
+  scaleOverrides?: Record<string, number>
 }
 
 const ASSET_PATHS = {
@@ -48,6 +61,7 @@ export class BillboardManager {
       verticalOffset: opts.verticalOffset ?? 0.025,
       debug:          opts.debug          ?? false,
       onHotspotTap:   opts.onHotspotTap   ?? (() => {}),
+      scaleOverrides: opts.scaleOverrides  ?? {},
     }
   }
 
@@ -102,11 +116,14 @@ export class BillboardManager {
     terrainObject.getWorldScale(_scale)
     const ts = _scale.x
 
-    for (const { sprite, anchor } of this.billboards) {
+    for (const { sprite, anchor, name } of this.billboards) {
       anchor.getWorldPosition(_v3)
       _v3.y += opts.verticalOffset * ts
       sprite.position.copy(_v3)
-      const size  = opts.baseSize * ts
+
+      // ── Per-sprite size: use override multiplier if defined, else 1.0 ──
+      const multiplier = opts.scaleOverrides[name] ?? 1.0
+      const size  = opts.baseSize * multiplier * ts
       const ratio = this._getAspect(sprite)
       sprite.scale.set(size * ratio, size, 1)
     }
