@@ -75,6 +75,12 @@ ecs.registerComponent({
     let placedY      = 0
     let heightOffset = 0
 
+    // Pan axes — computed in placeAtCurrentHit() from the camera→model
+    // direction at that moment. Fixed until the next placement/reset so
+    // controls are always consistent regardless of user rotation.
+    let panFwd:   {x: number; z: number} = {x: 0, z: 1}
+    let panRight: {x: number; z: number} = {x: 1, z: 0}
+
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
@@ -94,8 +100,6 @@ ecs.registerComponent({
         ui.hideHeightBar()
         ui.hideGestureHint()
 
-        // On close: soft-reset the scene and re-show all AR controls —
-        // no page reload needed.
         viewer.open(name, registry, () => {
           viewing360 = false
           performReset()
@@ -117,6 +121,8 @@ ecs.registerComponent({
     }
 
     // ── Place model at current ground hit ─────────────────────────────────
+    // Also bakes panFwd / panRight from the camera→model direction so the
+    // gesture controls are always aligned to this placement orientation.
     const placeAtCurrentHit = (): boolean => {
       const hits       = world.raycastFrom(eid)
       const groundHits = hits.filter((h: any) => h.eid === schema.ground)
@@ -131,6 +137,7 @@ ecs.registerComponent({
       placedY      = hit.y + Y_ABOVE_GROUND
       heightOffset = 0
 
+      // Facing quaternion: model looks toward camera
       const facingAngle = Math.atan2(cam.x - px, cam.z - pz)
       const half        = facingAngle / 2
 
@@ -139,11 +146,21 @@ ecs.registerComponent({
       ecs.Scale.set(world, schema.terrainEntity,
         {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
 
+      // Bake pan axes from camera→model direction projected on XZ.
+      // fwd  = direction from camera toward placed model (user pushes model away)
+      // right = fwd rotated 90° clockwise around Y
+      const dfx = px - cam.x
+      const dfz = pz - cam.z
+      const len  = Math.sqrt(dfx * dfx + dfz * dfz)
+      if (len > 0.0001) {
+        panFwd   = {x: dfx / len,  z: dfz / len}
+        panRight = {x: dfz / len,  z: -dfx / len}  // 90° CW rotation
+      }
+
       return true
     }
 
     // ── Re-show all placed-state AR controls ──────────────────────────────
-    // Called both from placed.onEnter and after closing the 360 viewer.
     const showControls = () => {
       ui.showRotationBar((deltaRad: number) => {
         const half = deltaRad * 0.5
@@ -162,13 +179,12 @@ ecs.registerComponent({
     }
 
     // ── Soft scene reset ──────────────────────────────────────────────────
-    // Raycasts from current camera, re-places the model in front of the
-    // user, rebuilds gestures and billboards, re-shows all controls.
     const performReset = async (): Promise<void> => {
-      placeAtCurrentHit()
+      placeAtCurrentHit()   // recalculates placedY, panFwd, panRight
 
+      // New GestureHandler with freshly baked axes
       gestures?.detach()
-      gestures = new GestureHandler(schema.terrainEntity, world, THREE, eid)
+      gestures = new GestureHandler(schema.terrainEntity, world, THREE, panFwd, panRight)
       gestures.attach()
 
       boards.dispose(world.three.scene)
@@ -225,8 +241,9 @@ ecs.registerComponent({
 
     ecs.defineState('placed')
       .onEnter(async () => {
+        // panFwd / panRight already set by placeAtCurrentHit() in scanning.onTick
         gestures?.detach()
-        gestures = new GestureHandler(schema.terrainEntity, world, THREE, eid)
+        gestures = new GestureHandler(schema.terrainEntity, world, THREE, panFwd, panRight)
         gestures.attach()
 
         boards.dispose(world.three.scene)
@@ -251,7 +268,6 @@ ecs.registerComponent({
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
-        // closeButton intentionally kept visible through all states
       })
   },
 
