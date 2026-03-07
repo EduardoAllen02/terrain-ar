@@ -104,12 +104,16 @@ export class GestureHandler {
       const {THREE} = this
       const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).setY(0).normalize()
       const right = new THREE.Vector3(1, 0,  0).applyQuaternion(cam.quaternion).setY(0).normalize()
-      const pos   = this.world.transform.getWorldPosition(this.terrainEid)
-      this.world.transform.setWorldPosition(this.terrainEid, {
-        x: pos.x + fwd.x * (-dy * DEPTH_SENSITIVITY) + right.x * (dx * HORIZONTAL_SENSITIVITY),
-        y: pos.y,
-        z: pos.z + fwd.z * (-dy * DEPTH_SENSITIVITY) + right.z * (dx * HORIZONTAL_SENSITIVITY),
-      })
+      const obj = this.world.three.entityToObject.get(this.terrainEid)
+        if (!obj) return
+        const worldPos = new this.THREE.Vector3()
+        obj.getWorldPosition(worldPos)
+        this.world.setPosition(
+          this.terrainEid,
+          worldPos.x + fwd.x * (-dy * DEPTH_SENSITIVITY) + right.x * (dx * HORIZONTAL_SENSITIVITY),
+          worldPos.y,
+          worldPos.z + fwd.z * (-dy * DEPTH_SENSITIVITY) + right.z * (dx * HORIZONTAL_SENSITIVITY),
+        )
     }
   }
 
