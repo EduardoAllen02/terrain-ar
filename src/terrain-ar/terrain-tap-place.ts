@@ -17,7 +17,7 @@ window.addEventListener('click',      () => requestFullscreenNow(), {once: true}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.28
+const INITIAL_SCALE  = 0.38
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
@@ -31,8 +31,8 @@ const HIDDEN_SCALE   = 0.00001
 //
 const HOTSPOT_SCALE_OVERRIDES: Record<string, number> = {
   'ZEMOLA':     1,
-  'ERTO':     0.7,
-  'CASSO':  0.7,
+  'ERTO':     0.85,
+  'CASSO':  0.85,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ ecs.registerComponent({
     const viewer   = new Viewer360(THREE)
 
     const boards = new BillboardManager(THREE, {
-      baseSize:       0.4,
+      baseSize:       0.35,
       verticalOffset: 0.025,
       debug:          false,
       scaleOverrides: HOTSPOT_SCALE_OVERRIDES,   // ← per-hotspot size overrides
