@@ -58,7 +58,7 @@ export class BillboardManager {
   ) {
     this.opts = {
       baseSize:       opts.baseSize       ?? 0.10,
-      verticalOffset: opts.verticalOffset ?? 0.025,
+      verticalOffset: opts.verticalOffset ?? 0,      // kept for API compat, no longer used
       debug:          opts.debug          ?? false,
       onHotspotTap:   opts.onHotspotTap   ?? (() => {}),
       scaleOverrides: opts.scaleOverrides  ?? {},
@@ -118,7 +118,10 @@ export class BillboardManager {
 
     for (const { sprite, anchor, name } of this.billboards) {
       anchor.getWorldPosition(_v3)
-      _v3.y += opts.verticalOffset * ts
+      // No verticalOffset: the anchor empty in Blender sits exactly on the
+      // terrain surface, and sprite.center = (0.5, 0) pins the bottom edge
+      // of the PNG to that world position, so the pin tip is always locked
+      // to the correct 3-D point regardless of camera angle.
       sprite.position.copy(_v3)
 
       // ── Per-sprite size: use override multiplier if defined, else 1.0 ──
@@ -212,6 +215,10 @@ export class BillboardManager {
       depthTest: false, depthWrite: false, sizeAttenuation: true,
     })
     const sprite = new THREE.Sprite(mat)
+    // Pivot at the bottom-centre of the PNG (the tip of the dotted pin).
+    // The anchor empty in Blender must be placed exactly on the terrain
+    // surface — no Z offset needed in Blender anymore.
+    sprite.center.set(0.5, 0)
     sprite.renderOrder = 999
     return sprite
   }
@@ -231,6 +238,7 @@ export class BillboardManager {
     ctx.font = 'bold 20px sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText(label, 128, 40)
+    // _makeSprite already sets center(0.5, 0) so debug sprites behave the same way
     return this._makeSprite(new this.THREE.CanvasTexture(canvas))
   }
 
