@@ -1,28 +1,30 @@
 /**
- * ArUiOverlay — v9
+ * ArUiOverlay — v10
  *
- * Changes vs v8:
- *  • Fullscreen button REMOVED — fullscreen is managed automatically.
- *  • `requestFullscreenNow()` exported — call once on the first user gesture.
- *  • `maintainFullscreen()` exported — re-enters fullscreen if it is lost
- *    (e.g. after a 360 viewer closes). Attach once at app startup.
- *  • X close button added (top-right corner). Tries window.close(); falls
- *    back to redirect. Set CLOSE_REDIRECT_URL below.
- *
- * ════════════════════════════════════════════════════════════
- * DEFINITIVE ORIENTATION FIX  (unchanged)
- * ════════════════════════════════════════════════════════════
+ * Changes vs v9:
+ *  • Fullscreen is NO LONGER automatic — the user must tap the custom
+ *    PNG button to enter it.
+ *  • `showFullscreenButton()` / `hideFullscreenButton()` added.
+ *    Shows the client-supplied PNG (FULLSCREEN_BTN_IMG).
+ *    After the user taps it, `maintainFullscreen()` activates so the
+ *    session stays fullscreen through the 360 viewer and back.
+ *  • While IN fullscreen the X close button is shown (unchanged).
+ *  • `requestFullscreenNow` / `maintainFullscreen` are still exported
+ *    but the auto-enter-on-first-touch is removed from terrain-tap-place.
  */
 
-// ───  Client config ────────────────────────────────────────────────────────
+// ── Client config ─────────────────────────────────────────────────────────────
+
+/** URL of the custom fullscreen-entry button image supplied by the client. */
+const FULLSCREEN_BTN_IMG = 'assets/ui/fullscreen-btn.png'
+
 /**
- * URL to navigate to when the X button is tapped and window.close() fails
- * (which is expected when the tab was opened by the user, not by script).
+ * URL to navigate to when the X button is tapped and window.close() fails.
  * Replace with the URL the client provides.
  */
 const CLOSE_REDIRECT_URL = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
 
-// ─── Viewport orientation fix ────────────────────────────────────────────────
+// ── Viewport orientation fix ──────────────────────────────────────────────────
 
 let _viewportFixInstalled = false
 export function installViewportFix(): void {
@@ -46,39 +48,28 @@ export function installViewportFix(): void {
   try { screen.orientation?.addEventListener('change', onOrientChange) } catch (_) {}
 }
 
-// ─── Fullscreen helpers (internal + exported utilities) ───────────────────────
+// ── Fullscreen helpers ────────────────────────────────────────────────────────
 
 function _enterFs(): void {
   const el = document.documentElement as any
   ;(el.requestFullscreen ?? el.webkitRequestFullscreen ?? el.mozRequestFullScreen)?.call(el)
-    ?.catch?.(() => {/* silently ignore if already fullscreen or permission denied */})
+    ?.catch?.(() => {})
 }
 
-/** True when any fullscreen element is active. */
 export function isFullscreen(): boolean {
   const doc = document as any
   return !!(doc.fullscreenElement ?? doc.webkitFullscreenElement ?? doc.mozFullScreenElement)
 }
 
-/**
- * Request fullscreen immediately (must be called from a user-gesture handler).
- * Safe to call multiple times; no-ops when already fullscreen.
- */
 export function requestFullscreenNow(): void {
   if (!isFullscreen()) _enterFs()
 }
 
-/**
- * Install a persistent listener that re-enters fullscreen whenever it is
- * exited unexpectedly (e.g. user presses Escape, or a 360 overlay closes).
- * Call once at app startup — harmless to call multiple times.
- */
 let _maintainInstalled = false
 export function maintainFullscreen(): void {
   if (_maintainInstalled) return
   _maintainInstalled = true
   const onFsChange = () => {
-    // Small delay so the browser settles before we try to re-enter
     if (!isFullscreen()) setTimeout(_enterFs, 120)
   }
   document.addEventListener('fullscreenchange',       onFsChange)
@@ -86,7 +77,7 @@ export function maintainFullscreen(): void {
   document.addEventListener('mozfullscreenchange',    onFsChange)
 }
 
-// ─── CSS ─────────────────────────────────────────────────────────────────────
+// ── CSS ───────────────────────────────────────────────────────────────────────
 
 const injectStyles = (() => {
   let done = false
@@ -147,7 +138,39 @@ const injectStyles = (() => {
       }
       @keyframes ar-label-pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
 
+      /* ── Custom PNG fullscreen button ───────────────────────────────── */
+      /*
+       * Shown ONLY when NOT in fullscreen.
+       * Uses the client-supplied PNG — no background, no border-radius,
+       * just the image itself at a comfortable tap size.
+       */
+      #ar-fs-btn {
+        position: fixed;
+        top:  18px;
+        right: 18px;
+        z-index: 9998;
+        width:  52px;
+        height: 52px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .25s ease;
+      }
+      #ar-fs-btn.ar-fs-visible { opacity: 1; pointer-events: all; }
+      #ar-fs-btn img {
+        width: 100%; height: 100%;
+        object-fit: contain; display: block;
+        /* Drop-shadow so the PNG reads against any background */
+        filter: drop-shadow(0 2px 6px rgba(0,0,0,0.30));
+      }
+      #ar-fs-btn:active img { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.20)); opacity:.8; }
+
       /* ── X Close button ─────────────────────────────────────────────── */
+      /* Shown ONLY while IN fullscreen */
       #ar-close-btn {
         position:fixed; top:18px; right:18px; z-index:9998;
         width:38px; height:38px;
@@ -285,6 +308,7 @@ const injectStyles = (() => {
         }
         #ar-bottom-bar     { max-width:600px; }
         #ar-close-btn      { top:10px; right:14px; width:32px; height:32px; }
+        #ar-fs-btn         { top:10px; right:14px; width:42px; height:42px; }
         .ar-hint-row       { padding:6px 12px; }
         .ar-hint-text      { font-size:10px; }
         .ar-hint-icon      { width:18px; height:18px; }
@@ -301,7 +325,7 @@ const injectStyles = (() => {
   }
 })()
 
-// ─── Track builder ────────────────────────────────────────────────────────────
+// ── Track builder ─────────────────────────────────────────────────────────────
 
 function buildTrack(
   id: string, thumbId: string, label: string,
@@ -325,7 +349,7 @@ function buildTrack(
   return track
 }
 
-// ─── Spring-track interaction ─────────────────────────────────────────────────
+// ── Spring-track interaction ──────────────────────────────────────────────────
 
 function attachTrack(
   track: HTMLElement, thumbEl: HTMLElement,
@@ -396,7 +420,8 @@ function attachTrack(
 
 export class ArUiOverlay {
   private loader:       HTMLElement | null = null
-  private closeBtn:     HTMLElement | null = null   // ← replaces fsBtn
+  private fsBtn:        HTMLElement | null = null   // ← PNG fullscreen button
+  private closeBtn:     HTMLElement | null = null   // ← X button (in-fullscreen)
   private gestureHint:  HTMLElement | null = null
   private bottomBar:    HTMLElement | null = null
   private rowTop:       HTMLElement | null = null
@@ -493,11 +518,48 @@ export class ArUiOverlay {
     setTimeout(() => el.remove(), 480)
   }
 
+  // ── PNG Fullscreen button ─────────────────────────────────────────────────
+  /**
+   * Shows the client-supplied PNG in the top-right corner.
+   * When tapped:
+   *   1. Enters fullscreen immediately (requires this to be called from
+   *      within a user-gesture handler on iOS — the touchstart that reaches
+   *      this button qualifies).
+   *   2. Activates maintainFullscreen() so the session never exits fullscreen
+   *      involuntarily (e.g. when 360 viewer opens/closes).
+   *   3. Hides itself and reveals the X close button instead.
+   */
+  showFullscreenButton(): void {
+    injectStyles()
+    if (this.fsBtn) return
+    const btn = document.createElement('button')
+    btn.id = 'ar-fs-btn'
+    btn.setAttribute('aria-label', 'Enter fullscreen')
+    btn.innerHTML = `<img src="${FULLSCREEN_BTN_IMG}" alt="Fullscreen" draggable="false">`
+    document.body.appendChild(btn)
+    this.fsBtn = btn
+    requestAnimationFrame(() => btn.classList.add('ar-fs-visible'))
+
+    btn.addEventListener('click', () => {
+      requestFullscreenNow()   // enter fullscreen on this gesture
+      maintainFullscreen()     // from now on, stay fullscreen always
+      this.hideFullscreenButton()
+      this._revealCloseButton()
+    })
+  }
+
+  hideFullscreenButton(): void {
+    if (!this.fsBtn) return
+    const el = this.fsBtn; this.fsBtn = null
+    el.classList.remove('ar-fs-visible')
+    setTimeout(() => el.remove(), 280)
+  }
+
   // ── X Close button ────────────────────────────────────────────────────────
   /**
-   * Shows a persistent X button in the top-right corner.
-   * Tapping it tries window.close(); if the browser blocks that (tab opened
-   * by the user), it falls back to navigating to CLOSE_REDIRECT_URL.
+   * Adds the X element to the DOM but keeps it invisible.
+   * Call once at app start — `showFullscreenButton()` will reveal it
+   * after the user enters fullscreen.
    */
   showCloseButton(): void {
     injectStyles()
@@ -513,15 +575,19 @@ export class ArUiOverlay {
     </svg>`
     document.body.appendChild(btn)
     this.closeBtn = btn
-    requestAnimationFrame(() => btn.classList.add('ar-close-visible'))
+    // NOTE: intentionally NOT adding ar-close-visible yet —
+    //       _revealCloseButton() does that after fullscreen is entered.
 
     btn.addEventListener('click', () => {
-      // Try to close the tab; browsers only honour this when the tab was
-      // opened programmatically (e.g. window.open). If it fails, redirect.
       window.close()
-      // Give the browser 300 ms to process the close; if we're still here, redirect.
       setTimeout(() => { window.location.href = CLOSE_REDIRECT_URL }, 300)
     })
+  }
+
+  /** Called internally once the user has entered fullscreen. */
+  private _revealCloseButton(): void {
+    if (!this.closeBtn) return
+    requestAnimationFrame(() => this.closeBtn?.classList.add('ar-close-visible'))
   }
 
   hideCloseButton(): void {

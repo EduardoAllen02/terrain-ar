@@ -10,28 +10,21 @@ import {checkArSupport, checkCameraAccess}                from './device-check'
 // ── Install orientation fix ASAP ─────────────────────────────────────────────
 installViewportFix()
 
-// ── Auto-fullscreen ───────────────────────────────────────────────────────────
-maintainFullscreen()
-window.addEventListener('touchstart', () => requestFullscreenNow(), {once: true, passive: true})
-window.addEventListener('click',      () => requestFullscreenNow(), {once: true})
+// ── Auto-fullscreen REMOVED ───────────────────────────────────────────────────
+// Fullscreen is now triggered manually via the PNG button in ArUiOverlay.
+// maintainFullscreen() is activated only after the user taps that button,
+// so the session stays fullscreen through the 360 viewer and back.
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.78
+const INITIAL_SCALE  = 0.58
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
-// ── Hotspots with a custom scale multiplier ───────────────────────────────────
-// Add here any hotspot name (must match the node name after the "hotspot_" prefix)
-// and its size multiplier relative to the global baseSize.
-// Hotspots NOT listed here will use the default baseSize (multiplier = 1.0).
-//
-//   > 1.0  →  larger than the rest
-//   < 1.0  →  smaller than the rest
-//
+// ── Per-hotspot scale overrides ───────────────────────────────────────────────
 const HOTSPOT_SCALE_OVERRIDES: Record<string, number> = {
-  'ZEMOLA':     0.9,
-  'ERTO':     0.9,
+  'ZEMOLA': 0.9,
+  'ERTO':   0.9,
   'CASSO':  0.9,
 }
 
@@ -106,7 +99,7 @@ ecs.registerComponent({
       baseSize:       0.35,
       verticalOffset: 0.025,
       debug:          false,
-      scaleOverrides: HOTSPOT_SCALE_OVERRIDES,   // ← per-hotspot size overrides
+      scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
       onHotspotTap: (name) => {
         if (viewing360) return
         viewing360 = true
@@ -144,6 +137,9 @@ ecs.registerComponent({
         if (ecs.Hidden.has(world, schema.terrainEntity))
           ecs.Hidden.remove(world, schema.terrainEntity)
         ui.showLoader()
+        // PNG fullscreen button visible from the start.
+        // X close button is added to DOM now (hidden), revealed after fs is entered.
+        ui.showFullscreenButton()
         ui.showCloseButton()
       })
       .onTick(() => {
@@ -230,6 +226,7 @@ ecs.registerComponent({
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
+        // closeButton intentionally kept visible through all states
       })
   },
 
