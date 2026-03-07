@@ -144,8 +144,13 @@ ecs.registerComponent({
       placedY      = hit.y + Y_ABOVE_GROUND   // new ground reference for height bar
       heightOffset = 0
 
+      // Rotate model around Y so its front always faces the camera.
+      // atan2(dx, dz) gives the Y angle whose +Z axis points at the camera.
+      const facingAngle = Math.atan2(cam.x - px, cam.z - pz)
+      const half        = facingAngle / 2
+
       world.setPosition(schema.terrainEntity, px, placedY, pz)
-      world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
+      world.setQuaternion(schema.terrainEntity, 0, Math.sin(half), 0, Math.cos(half))
       ecs.Scale.set(world, schema.terrainEntity,
         {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
 
