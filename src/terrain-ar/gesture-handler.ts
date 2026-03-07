@@ -147,8 +147,10 @@ export class GestureHandler {
   }
 
   private _getCamera(): any {
-    let cam: any = null
-    this.world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
-    return cam
+    // world.three.camera is the renderer's active camera — its quaternion
+    // is updated every frame by 8th Wall's AR tracking pipeline.
+    // scene.traverse() finds the first camera in the scene graph which is
+    // a static placeholder and never updates, so we must NOT use it.
+    return this.world.three.camera ?? null
   }
 }
