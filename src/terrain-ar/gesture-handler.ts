@@ -1,18 +1,17 @@
 /**
- * GestureHandler — v5
+ * GestureHandler — v6
  *
- * Two-finger:
- *   SCALE — driven by spread distance between fingers
- *   (Rotation is handled by the ArUiOverlay rotation bar, not here)
- *
- * Single finger:
- *   PAN — move model forward/back + left/right relative to camera
+ * Changes vs v5:
+ *  • Accepts `cameraEid` in constructor.
+ *    _getCamera() now resolves the THREE object directly from
+ *    world.three.entityToObject instead of traversing the whole scene,
+ *    guaranteeing the live AR camera quaternion is always used for pan.
  */
 
 const DEPTH_SENSITIVITY      = 0.005
 const HORIZONTAL_SENSITIVITY = 0.005
 const SCALE_MIN              = 0.02
-const SCALE_MAX              = Infinity   // ← no upper limit; user can scale as large as desired
+const SCALE_MAX              = Infinity
 const MIN_SPREAD             = 10
 
 export class GestureHandler {
@@ -29,6 +28,7 @@ export class GestureHandler {
     private readonly terrainEid: any,
     private readonly world: any,
     private readonly THREE: any,
+    private readonly cameraEid: any,   // ← camera entity for live quaternion
   ) {}
 
   attach(): void {
@@ -99,8 +99,8 @@ export class GestureHandler {
       const cam = this._getCamera()
       if (!cam) return
       const {THREE} = this
-      const fwd   = new THREE.Vector3(0,0,-1).applyQuaternion(cam.quaternion).setY(0).normalize()
-      const right = new THREE.Vector3(1,0, 0).applyQuaternion(cam.quaternion).setY(0).normalize()
+      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).setY(0).normalize()
+      const right = new THREE.Vector3(1, 0,  0).applyQuaternion(cam.quaternion).setY(0).normalize()
       const pos   = this.world.transform.getWorldPosition(this.terrainEid)
       this.world.transform.setWorldPosition(this.terrainEid, {
         x: pos.x + fwd.x * (-dy * DEPTH_SENSITIVITY) + right.x * (dx * HORIZONTAL_SENSITIVITY),
@@ -112,7 +112,7 @@ export class GestureHandler {
 
   private _onEnd = (e: TouchEvent): void => {
     const remaining = Array.from(e.touches)
-    if (remaining.length === 0)     { this.sf = null; this.tf = null }
+    if (remaining.length === 0)      { this.sf = null; this.tf = null }
     else if (remaining.length === 1) {
       this.tf = null
       const t = remaining[0]
@@ -124,22 +124,33 @@ export class GestureHandler {
 
   private _spread(a: Touch, b: Touch): number {
     const dx = a.clientX - b.clientX, dy = a.clientY - b.clientY
-    return Math.sqrt(dx*dx + dy*dy)
+    return Math.sqrt(dx * dx + dy * dy)
   }
 
   private _getScale(): number {
     const ecs = (window as any).ecs
-    if (ecs?.Scale?.has(this.world, this.terrainEid)) return ecs.Scale.get(this.world, this.terrainEid).x
+    if (ecs?.Scale?.has(this.world, this.terrainEid))
+      return ecs.Scale.get(this.world, this.terrainEid).x
     return this.world.three.entityToObject.get(this.terrainEid)?.scale.x ?? 1
   }
 
   private _setScale(s: number): void {
     const ecs = (window as any).ecs
     if (ecs?.Scale) ecs.Scale.set(this.world, this.terrainEid, {x: s, y: s, z: s})
-    else { const obj = this.world.three.entityToObject.get(this.terrainEid); if (obj) obj.scale.set(s,s,s) }
+    else {
+      const obj = this.world.three.entityToObject.get(this.terrainEid)
+      if (obj) obj.scale.set(s, s, s)
+    }
   }
 
+  // Resolves the camera THREE object directly from the ECS entity map —
+  // guarantees the live AR camera quaternion is used regardless of
+  // what other cameras may exist in the scene.
   private _getCamera(): any {
+    const fromEid = this.world.three.entityToObject.get(this.cameraEid)
+    if (fromEid) return fromEid
+
+    // Fallback: traverse scene (original behaviour, kept for safety)
     let cam: any = null
     this.world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
     return cam

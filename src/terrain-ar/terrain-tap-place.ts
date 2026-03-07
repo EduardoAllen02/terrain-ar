@@ -168,7 +168,7 @@ ecs.registerComponent({
       placeAtCurrentHit()
 
       gestures?.detach()
-      gestures = new GestureHandler(schema.terrainEntity, world, THREE)
+      gestures = new GestureHandler(schema.terrainEntity, world, THREE, eid)
       gestures.attach()
 
       boards.dispose(world.three.scene)
@@ -226,7 +226,7 @@ ecs.registerComponent({
     ecs.defineState('placed')
       .onEnter(async () => {
         gestures?.detach()
-        gestures = new GestureHandler(schema.terrainEntity, world, THREE)
+        gestures = new GestureHandler(schema.terrainEntity, world, THREE, eid)
         gestures.attach()
 
         boards.dispose(world.three.scene)
