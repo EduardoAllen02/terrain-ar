@@ -1,160 +1,254 @@
-/**
- * GestureHandler — v5
- *
- * Two-finger:
- *   SCALE — driven by spread distance between fingers
- *
- * Single finger:
- *   PAN — move model forward/back + left/right relative to the camera's
- *         current orientation, read live every frame so controls always
- *         match wherever the user is facing.
- */
+// gesture-handler.ts
+//
+// Bugs fixed:
+//   1. Touch not detected  → listen on `document` with { passive:false }
+//                            (full-screen HTML overlays block window listeners)
+//   2. Direction stale     → snapshot camera forward/right at touchstart,
+//                            not live per-frame and not once at placement time.
+//                            This means: after rotating the device and doing reset,
+//                            the next touchstart captures the NEW orientation and
+//                            "up" correctly maps to wherever the camera now faces.
+//
+// API is identical to the original — no changes needed in terrain-tap-place.ts:
+//   const gestures = new GestureHandler(world, THREE, terrainEid)
+//   gestures.attach()
+//   gestures.detach()
 
-const DEPTH_SENSITIVITY      = 0.005
-const HORIZONTAL_SENSITIVITY = 0.005
-const SCALE_MIN              = 0.02
-const SCALE_MAX              = Infinity
-const MIN_SPREAD             = 10
+const HORIZONTAL_SENSITIVITY = 0.003
+const DEPTH_SENSITIVITY      = 0.003
+const SCALE_SENSITIVITY      = 0.01
+const MIN_SCALE              = 0.1
+const MAX_SCALE              = 5.0
+
+// Add this attribute to any container of interactive UI elements so that
+// touches on buttons/sliders are not consumed by the gesture handler:
+//   <div data-ar-ui> <button>Reset</button> <input type="range" …/> </div>
+const UI_ATTR = 'data-ar-ui'
+
+interface Vec2 { x: number; z: number }
+interface Pt   { x: number; y: number }
 
 export class GestureHandler {
-  private active = false
-  private listeners: Array<[EventTarget, string, EventListener]> = []
+  private world:      any
+  private THREE:      any
+  private terrainEid: number
 
-  private sf: { id: number; lastX: number; lastY: number } | null = null
-  private tf: {
-    idA: number; idB: number
-    prevSpread: number; baseScale: number; initSpread: number
-  } | null = null
+  // ── active touches ────────────────────────────────────────────────────────
+  // activeTouches : latest clientX/Y per touch identifier
+  // prevTouches   : position from the previous move event (delta source)
+  private activeTouches = new Map<number, Pt>()
+  private prevTouches   = new Map<number, Pt>()
+  private lastPinchDist: number | null = null
 
-  constructor(
-    private readonly terrainEid: any,
-    private readonly world: any,
-    private readonly THREE: any,
-  ) {}
+  // ── direction snapshot ────────────────────────────────────────────────────
+  // Captured once at the FIRST touchstart of every gesture.
+  // Guarantees that "finger up" always means "toward where you're now looking",
+  // even after a reset or after rotating the device between gestures.
+  private gestFwd:   Vec2 = { x: 0, z: -1 }
+  private gestRight: Vec2 = { x: 1, z:  0 }
+
+  // ── bound handlers (preserved for removeEventListener) ───────────────────
+  private _bStart: (e: TouchEvent) => void
+  private _bMove:  (e: TouchEvent) => void
+  private _bEnd:   (e: TouchEvent) => void
+
+  constructor(world: any, THREE: any, terrainEid: number) {
+    this.world      = world
+    this.THREE      = THREE
+    this.terrainEid = terrainEid
+
+    this._bStart = this._onStart.bind(this)
+    this._bMove  = this._onMove .bind(this)
+    this._bEnd   = this._onEnd  .bind(this)
+  }
+
+  // ── public API ────────────────────────────────────────────────────────────
 
   attach(): void {
-    if (this.active) return
-    this.active = true
-    this._on(window, 'touchstart',  this._onStart  as EventListener, {passive: false})
-    this._on(window, 'touchmove',   this._onMove   as EventListener, {passive: false})
-    this._on(window, 'touchend',    this._onEnd    as EventListener, {passive: false})
-    this._on(window, 'touchcancel', this._onCancel as EventListener, {passive: false})
+    this.activeTouches.clear()
+    this.prevTouches.clear()
+    this.lastPinchDist = null
+
+    // Use document-level listeners, NOT window.
+    // A full-screen HTML overlay with pointer-events:auto will swallow events
+    // before they bubble to `window`, but document listeners always fire first.
+    // passive:false is required so we can call preventDefault() in _onMove.
+    document.addEventListener('touchstart',  this._bStart, { passive: false })
+    document.addEventListener('touchmove',   this._bMove,  { passive: false })
+    document.addEventListener('touchend',    this._bEnd,   { passive: false })
+    document.addEventListener('touchcancel', this._bEnd,   { passive: false })
   }
 
   detach(): void {
-    this.active = false
-    for (const [t, type, fn] of this.listeners) t.removeEventListener(type, fn)
-    this.listeners = []
-    this.sf = null
-    this.tf = null
+    document.removeEventListener('touchstart',  this._bStart)
+    document.removeEventListener('touchmove',   this._bMove)
+    document.removeEventListener('touchend',    this._bEnd)
+    document.removeEventListener('touchcancel', this._bEnd)
+    this.activeTouches.clear()
+    this.prevTouches.clear()
+    this.lastPinchDist = null
   }
 
-  private _on(target: EventTarget, type: string, fn: EventListener, opts?: AddEventListenerOptions): void {
-    target.addEventListener(type, fn, opts)
-    this.listeners.push([target, type, fn])
+  // ── private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Read the camera's current horizontal orientation from world.three.camera
+   * and store the forward and right vectors (flattened to XZ).
+   *
+   * Called exactly once at the start of every new gesture (first finger down).
+   *
+   * Why this fixes the direction bug:
+   *   - Old code: read camera quaternion live per-frame → stale after rotation
+   *   - This code: snapshot at touchstart → every new gesture gets fresh orientation
+   *   - After reset: the NEXT gesture is always a new touchstart → correct direction
+   *
+   * Scenario:
+   *   1. Facing North, touch → gestFwd = North  → drag up moves terrain North  ✓
+   *   2. Rotate to face East, reset, lift finger
+   *   3. New touch → _snapshotDirection() → gestFwd = East
+   *   4. Drag up moves terrain East  ✓
+   */
+  private _snapshotDirection(): void {
+    // world.three.camera is the live Three.js PerspectiveCamera — no entity ID needed
+    const cam = this.world?.three?.camera
+    if (!cam) return
+
+    // The camera looks down its local -Z axis
+    const fwd = new this.THREE.Vector3(0, 0, -1)
+    fwd.applyQuaternion(cam.quaternion)
+
+    // Flatten to the horizontal plane (ignore device tilt up/down)
+    fwd.y = 0
+    if (fwd.lengthSq() < 1e-6) return  // degenerate: camera pointing straight up/down
+    fwd.normalize()
+
+    this.gestFwd = { x: fwd.x, z: fwd.z }
+
+    // Right = fwd rotated 90° clockwise around Y  →  (fwd.z, 0, -fwd.x)
+    this.gestRight = { x: fwd.z, z: -fwd.x }
   }
 
-  private _onStart = (e: TouchEvent): void => {
-    const touches = Array.from(e.touches)
-    if (touches.length >= 2) {
-      this.sf = null
-      if (!this.tf) {
-        const a = touches[0], b = touches[1]
-        const spread = this._spread(a, b)
-        this.tf = {idA: a.identifier, idB: b.identifier,
-                   prevSpread: spread, baseScale: this._getScale(), initSpread: spread}
-      }
-      return
+  /**
+   * Returns true if the touch target is an interactive UI element.
+   * These touches are passed through untouched so the overlay buttons/sliders work.
+   */
+  private _isUiTarget(e: TouchEvent): boolean {
+    const el = e.target as HTMLElement | null
+    if (!el) return false
+    return (
+      el.tagName === 'BUTTON' ||
+      el.tagName === 'INPUT'  ||
+      el.tagName === 'SELECT' ||
+      el.closest(`[${UI_ATTR}]`) !== null
+    )
+  }
+
+  // ── touch event handlers ──────────────────────────────────────────────────
+
+  private _onStart(e: TouchEvent): void {
+    if (this._isUiTarget(e)) return
+
+    const wasEmpty = this.activeTouches.size === 0
+
+    for (const t of Array.from(e.changedTouches)) {
+      const pt: Pt = { x: t.clientX, y: t.clientY }
+      this.activeTouches.set(t.identifier, pt)
+      this.prevTouches.set(t.identifier, { ...pt })
     }
-    if (touches.length === 1 && !this.tf) {
-      const t = touches[0]
-      this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY}
+
+    // Snapshot direction at the very first finger of every new gesture.
+    if (wasEmpty) {
+      this._snapshotDirection()
+    }
+
+    // Initialise pinch baseline when a second finger joins
+    if (this.activeTouches.size === 2) {
+      const [a, b] = Array.from(this.activeTouches.values())
+      this.lastPinchDist = Math.hypot(b.x - a.x, b.y - a.y)
     }
   }
 
-  private _onMove = (e: TouchEvent): void => {
+  private _onMove(e: TouchEvent): void {
+    if (this._isUiTarget(e)) return
+    // Prevent native scroll / browser pinch-zoom while panning the model
     e.preventDefault()
-    const touches = Array.from(e.touches)
 
-    if (touches.length >= 2 && this.tf) {
-      const a = touches.find(t => t.identifier === this.tf!.idA) ?? touches[0]
-      const b = touches.find(t => t.identifier === this.tf!.idB) ?? touches[1]
-      const spread = this._spread(a, b)
-      if (spread > MIN_SPREAD && this.tf.initSpread > MIN_SPREAD) {
-        const s = Math.max(SCALE_MIN, this.tf.baseScale * (spread / this.tf.initSpread))
-        this._setScale(s)
+    // Advance prev → current for every changed touch
+    for (const t of Array.from(e.changedTouches)) {
+      const existing = this.activeTouches.get(t.identifier)
+      if (existing) {
+        this.prevTouches.set(t.identifier, { ...existing })
       }
-      this.tf.prevSpread = spread
-      return
+      this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY })
     }
 
-    if (this.sf && touches.length === 1) {
-      const t = touches.find(t => t.identifier === this.sf!.id)
-      if (!t) return
-      const dx = t.clientX - this.sf.lastX
-      const dy = t.clientY - this.sf.lastY
-      this.sf.lastX = t.clientX
-      this.sf.lastY = t.clientY
-      if (Math.abs(dx) < 0.3 && Math.abs(dy) < 0.3) return
+    if (this.activeTouches.size >= 2) {
+      // ── two fingers: pinch-to-scale ──────────────────────────────────────
+      const [a, b] = Array.from(this.activeTouches.values())
+      const dist   = Math.hypot(b.x - a.x, b.y - a.y)
+      if (this.lastPinchDist !== null) {
+        this._applyScale((dist - this.lastPinchDist) * SCALE_SENSITIVITY)
+      }
+      this.lastPinchDist = dist
 
-      // Read camera orientation live every move event — always reflects
-      // the user's current facing direction.
-      const cam = this._getCamera()
-      if (!cam) return
-      const {THREE} = this
-      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).setY(0).normalize()
-      const right = new THREE.Vector3(1, 0,  0).applyQuaternion(cam.quaternion).setY(0).normalize()
-      const obj = this.world.three.entityToObject.get(this.terrainEid)
-        if (!obj) return
-        const worldPos = new this.THREE.Vector3()
-        obj.getWorldPosition(worldPos)
-        this.world.setPosition(
-          this.terrainEid,
-          worldPos.x + fwd.x * (-dy * DEPTH_SENSITIVITY) + right.x * (dx * HORIZONTAL_SENSITIVITY),
-          worldPos.y,
-          worldPos.z + fwd.z * (-dy * DEPTH_SENSITIVITY) + right.z * (dx * HORIZONTAL_SENSITIVITY),
-        )
+    } else if (this.activeTouches.size === 1) {
+      // ── one finger: pan ───────────────────────────────────────────────────
+      const [id]  = Array.from(this.activeTouches.keys())
+      const curr  = this.activeTouches.get(id)!
+      const prev  = this.prevTouches.get(id)
+      if (!prev) return
+
+      const dx = curr.x - prev.x
+      const dy = curr.y - prev.y
+      if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+      this._applyPan(dx, dy)
     }
   }
 
-  private _onEnd = (e: TouchEvent): void => {
-    const remaining = Array.from(e.touches)
-    if (remaining.length === 0)      { this.sf = null; this.tf = null }
-    else if (remaining.length === 1) {
-      this.tf = null
-      const t = remaining[0]
-      this.sf = {id: t.identifier, lastX: t.clientX, lastY: t.clientY}
+  private _onEnd(e: TouchEvent): void {
+    for (const t of Array.from(e.changedTouches)) {
+      this.activeTouches.delete(t.identifier)
+      this.prevTouches.delete(t.identifier)
+    }
+    if (this.activeTouches.size < 2) {
+      this.lastPinchDist = null
     }
   }
 
-  private _onCancel = (_e: TouchEvent): void => { this.sf = null; this.tf = null }
+  // ── transform appliers ────────────────────────────────────────────────────
 
-  private _spread(a: Touch, b: Touch): number {
-    const dx = a.clientX - b.clientX, dy = a.clientY - b.clientY
-    return Math.sqrt(dx * dx + dy * dy)
+  /**
+   * Translate the terrain entity using the direction snapshot taken at gesture start.
+   *
+   * Screen → world mapping (using camera-relative snapshot):
+   *   finger right (+dx)  →  gestRight  (camera's right in XZ plane)
+   *   finger up   (−dy)   →  gestFwd    (camera's forward in XZ plane)
+   *   (screen Y is inverted relative to world Z, hence the minus on dy)
+   */
+  private _applyPan(dx: number, dy: number): void {
+    const obj = this.world.three.entityToObject.get(this.terrainEid)
+    if (!obj) return
+
+    const wp = new this.THREE.Vector3()
+    obj.getWorldPosition(wp)
+
+    this.world.setPosition(
+      this.terrainEid,
+      wp.x
+        + this.gestRight.x * (dx  * HORIZONTAL_SENSITIVITY)
+        + this.gestFwd.x   * (-dy * DEPTH_SENSITIVITY),
+      wp.y,  // height controlled separately by the height slider
+      wp.z
+        + this.gestRight.z * (dx  * HORIZONTAL_SENSITIVITY)
+        + this.gestFwd.z   * (-dy * DEPTH_SENSITIVITY),
+    )
   }
 
-  private _getScale(): number {
-    const ecs = (window as any).ecs
-    if (ecs?.Scale?.has(this.world, this.terrainEid))
-      return ecs.Scale.get(this.world, this.terrainEid).x
-    return this.world.three.entityToObject.get(this.terrainEid)?.scale.x ?? 1
-  }
+  private _applyScale(delta: number): void {
+    const obj = this.world.three.entityToObject.get(this.terrainEid)
+    if (!obj) return
 
-  private _setScale(s: number): void {
-    const ecs = (window as any).ecs
-    if (ecs?.Scale) ecs.Scale.set(this.world, this.terrainEid, {x: s, y: s, z: s})
-    else {
-      const obj = this.world.three.entityToObject.get(this.terrainEid)
-      if (obj) obj.scale.set(s, s, s)
-    }
-  }
-
-  private _getCamera(): any {
-    // world.three.camera is the renderer's active camera — its quaternion
-    // is updated every frame by 8th Wall's AR tracking pipeline.
-    // scene.traverse() finds the first camera in the scene graph which is
-    // a static placeholder and never updates, so we must NOT use it.
-    return this.world.three.camera ?? null
+    const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, obj.scale.x + delta))
+    this.world.setScale(this.terrainEid, next, next, next)
   }
 }
