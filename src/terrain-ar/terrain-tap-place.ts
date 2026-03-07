@@ -56,17 +56,6 @@ function disableAbsoluteScale(world: any, terrainEid: any): void {
   } catch (_) {}
 }
 
-function seamlessReload(): void {
-  const div = document.createElement('div')
-  div.style.cssText =
-    'position:fixed;inset:0;z-index:999999;background:#000;pointer-events:all;opacity:0;transition:opacity .25s ease;'
-  document.body.appendChild(div)
-  requestAnimationFrame(() => {
-    div.style.opacity = '1'
-    setTimeout(() => window.location.reload(), 280)
-  })
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 ecs.registerComponent({
@@ -83,7 +72,6 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
-    // placedY tracks the base Y for the height bar (recalculated on reset).
     let placedY      = 0
     let heightOffset = 0
 
@@ -106,7 +94,12 @@ ecs.registerComponent({
         ui.hideHeightBar()
         ui.hideGestureHint()
 
-        viewer.open(name, registry, () => seamlessReload())
+        // On close: soft-reset the scene and re-show all AR controls —
+        // no page reload needed.
+        viewer.open(name, registry, () => {
+          viewing360 = false
+          performReset()
+        })
       },
     })
 
@@ -124,12 +117,6 @@ ecs.registerComponent({
     }
 
     // ── Place model at current ground hit ─────────────────────────────────
-    //
-    // Shared by both the initial scanning placement and every subsequent
-    // reset. Raycasts from the camera entity right now, finds the ground,
-    // applies the same CAMERA_OFFSET + Y_ABOVE_GROUND used at startup.
-    // Returns true if a ground hit was found and the model was placed.
-    //
     const placeAtCurrentHit = (): boolean => {
       const hits       = world.raycastFrom(eid)
       const groundHits = hits.filter((h: any) => h.eid === schema.ground)
@@ -141,11 +128,9 @@ ecs.registerComponent({
         THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET,
       )
 
-      placedY      = hit.y + Y_ABOVE_GROUND   // new ground reference for height bar
+      placedY      = hit.y + Y_ABOVE_GROUND
       heightOffset = 0
 
-      // Rotate model around Y so its front always faces the camera.
-      // atan2(dx, dz) gives the Y angle whose +Z axis points at the camera.
       const facingAngle = Math.atan2(cam.x - px, cam.z - pz)
       const half        = facingAngle / 2
 
@@ -157,24 +142,35 @@ ecs.registerComponent({
       return true
     }
 
+    // ── Re-show all placed-state AR controls ──────────────────────────────
+    // Called both from placed.onEnter and after closing the 360 viewer.
+    const showControls = () => {
+      ui.showRotationBar((deltaRad: number) => {
+        const half = deltaRad * 0.5
+        world.transform.rotateSelf(schema.terrainEntity,
+          {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
+      })
+
+      ui.showHeightBar((delta: number) => {
+        heightOffset = Math.max(0, heightOffset + delta)
+        const pos = world.transform.getWorldPosition(schema.terrainEntity)
+        world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
+      })
+
+      ui.showResetButton(() => performReset())
+      ui.showGestureHint()
+    }
+
     // ── Soft scene reset ──────────────────────────────────────────────────
-    //
-    // Re-runs a ground raycast from wherever the camera is NOW, places the
-    // model in front of the user exactly as the initial hit-test did, then
-    // resets all controls to their default state.
-    //
-    const performReset = async (reRegisterResetBtn: () => void): Promise<void> => {
-      // Place at current camera hit (recalculates placedY and heightOffset).
-      // If no ground is detected (rare edge case), we skip silently and just
-      // re-register the button so the user can try again.
+    // Raycasts from current camera, re-places the model in front of the
+    // user, rebuilds gestures and billboards, re-shows all controls.
+    const performReset = async (): Promise<void> => {
       placeAtCurrentHit()
 
-      // Fresh GestureHandler — clears all accumulated pan/scale/spread state.
       gestures?.detach()
       gestures = new GestureHandler(schema.terrainEntity, world, THREE)
       gestures.attach()
 
-      // Reinitialise billboards at the new world position.
       boards.dispose(world.three.scene)
       const obj = getTerrainObj()
       if (obj) {
@@ -182,7 +178,7 @@ ecs.registerComponent({
         registry.register(names)
       }
 
-      reRegisterResetBtn()
+      showControls()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -233,9 +229,6 @@ ecs.registerComponent({
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        // placedY was set by placeAtCurrentHit() in scanning.onTick.
-        // heightOffset is already 0.
-
         boards.dispose(world.three.scene)
         const obj = getTerrainObj()
         if (obj) {
@@ -243,24 +236,7 @@ ecs.registerComponent({
           registry.register(names)
         }
 
-        ui.showRotationBar((deltaRad: number) => {
-          const half = deltaRad * 0.5
-          world.transform.rotateSelf(schema.terrainEntity,
-            {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
-        })
-
-        ui.showHeightBar((delta: number) => {
-          heightOffset = Math.max(0, heightOffset + delta)
-          const pos = world.transform.getWorldPosition(schema.terrainEntity)
-          world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
-        })
-
-        const registerResetBtn = () => {
-          ui.showResetButton(() => performReset(registerResetBtn))
-        }
-        registerResetBtn()
-
-        ui.showGestureHint()
+        showControls()
         dataAttribute.cursor(eid).placed = true
       })
       .onTick(() => {
