@@ -1,5 +1,5 @@
 /**
- * GestureHandler — v5
+ * GestureHandler — v5 (direction fix)
  *
  * Two-finger:
  *   SCALE — driven by spread distance between fingers
@@ -7,6 +7,12 @@
  *
  * Single finger:
  *   PAN — move model forward/back + left/right relative to camera
+ *
+ * Fix vs original v5:
+ *   _getCamera() was traversing scene.traverse() which finds an internal
+ *   Three.js camera that does NOT update with device orientation in 8th Wall.
+ *   Changed to return world.three.camera — the actual live AR camera.
+ *   Everything else is identical to the working original.
  */
 
 const DEPTH_SENSITIVITY      = 0.005
@@ -99,8 +105,8 @@ export class GestureHandler {
       const cam = this._getCamera()
       if (!cam) return
       const {THREE} = this
-      const fwd   = new THREE.Vector3(0,0,-1).applyQuaternion(cam.quaternion).setY(0).normalize()
-      const right = new THREE.Vector3(1,0, 0).applyQuaternion(cam.quaternion).setY(0).normalize()
+      const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).setY(0).normalize()
+      const right = new THREE.Vector3(1, 0,  0).applyQuaternion(cam.quaternion).setY(0).normalize()
       const pos   = this.world.transform.getWorldPosition(this.terrainEid)
       this.world.transform.setWorldPosition(this.terrainEid, {
         x: pos.x + fwd.x * (-dy * DEPTH_SENSITIVITY) + right.x * (dx * HORIZONTAL_SENSITIVITY),
@@ -112,7 +118,7 @@ export class GestureHandler {
 
   private _onEnd = (e: TouchEvent): void => {
     const remaining = Array.from(e.touches)
-    if (remaining.length === 0)     { this.sf = null; this.tf = null }
+    if (remaining.length === 0)      { this.sf = null; this.tf = null }
     else if (remaining.length === 1) {
       this.tf = null
       const t = remaining[0]
@@ -124,7 +130,7 @@ export class GestureHandler {
 
   private _spread(a: Touch, b: Touch): number {
     const dx = a.clientX - b.clientX, dy = a.clientY - b.clientY
-    return Math.sqrt(dx*dx + dy*dy)
+    return Math.sqrt(dx * dx + dy * dy)
   }
 
   private _getScale(): number {
@@ -136,12 +142,17 @@ export class GestureHandler {
   private _setScale(s: number): void {
     const ecs = (window as any).ecs
     if (ecs?.Scale) ecs.Scale.set(this.world, this.terrainEid, {x: s, y: s, z: s})
-    else { const obj = this.world.three.entityToObject.get(this.terrainEid); if (obj) obj.scale.set(s,s,s) }
+    else {
+      const obj = this.world.three.entityToObject.get(this.terrainEid)
+      if (obj) obj.scale.set(s, s, s)
+    }
   }
 
+  // ── THE FIX ───────────────────────────────────────────────────────────────
+  // Original used scene.traverse() which finds an internal camera that does
+  // NOT reflect device orientation in 8th Wall AR.
+  // world.three.camera is the live AR camera updated every frame by 8th Wall.
   private _getCamera(): any {
-    let cam: any = null
-    this.world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
-    return cam
+    return this.world.three.camera ?? null
   }
 }
