@@ -83,10 +83,12 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
-    // ── Height / position tracking ────────────────────────────────────────
-    // placedY = Y of the model at initial placement (hit.y + Y_ABOVE_GROUND).
-    // Never changes after first placement — only heightOffset grows from it.
+    // ── Original placement position (captured once in placed.onEnter) ─────
+    // These are the exact XYZ where the model landed after the first hit-test.
+    // Reset always returns to these coordinates — no recomputation needed.
+    let placedX      = 0
     let placedY      = 0
+    let placedZ      = 0
     let heightOffset = 0
 
     const ui       = new ArUiOverlay()
@@ -127,58 +129,28 @@ ecs.registerComponent({
 
     // ── Soft scene reset ──────────────────────────────────────────────────
     //
-    // Replicates exactly what scanning→placed does:
-    //  1. Compute position in front of camera (XZ), same Y as first placement.
-    //  2. Reset scale to INITIAL_SCALE, quaternion to identity.
-    //  3. Destroy & recreate GestureHandler so all internal pan/scale state
-    //     (baseScale, initSpread, lastX/Y…) is fully cleared.
-    //  4. Reset heightOffset to 0 (placedY stays as the original ground Y).
-    //  5. Dispose and reinitialise billboards so their world positions and
-    //     anchor references are recalculated against the new placement.
-    //  6. Re-register the reset button so it remains available.
+    // Restores the scene to exactly the state it was in right after the
+    // first hit-test placement:
+    //  • Position  → original placedX/Y/Z (no heightOffset)
+    //  • Rotation  → identity quaternion
+    //  • Scale     → INITIAL_SCALE
+    //  • Gestures  → fresh GestureHandler (clears all accumulated pan/scale)
+    //  • Billboards → disposed + reinitialised at new world position
     //
     const performReset = async (reRegisterResetBtn: () => void): Promise<void> => {
-      // ── 1. Compute new XZ placement in front of camera ──────────────────
-      // Get camera position from ECS (the camera entity = eid).
-      const camPos = ecs.Position.get(world, eid)
-
-      // Get the THREE camera for its look direction.
-      let threeCam: any = null
-      world.three.scene.traverse((c: any) => { if (c.isCamera && !threeCam) threeCam = c })
-
-      let px = camPos.x
-      let pz = camPos.z
-
-      if (threeCam) {
-        // Forward direction projected onto XZ plane, then normalised.
-        const fwd = new THREE.Vector3(0, 0, -1)
-          .applyQuaternion(threeCam.quaternion)
-          .setY(0)
-          .normalize()
-        // Place model CAMERA_OFFSET metres in front of camera —
-        // identical to how scanning offsets toward the camera from the hit point.
-        px = camPos.x + fwd.x * CAMERA_OFFSET
-        pz = camPos.z + fwd.z * CAMERA_OFFSET
-      }
-
-      // Y: reuse placedY (= original hit.y + Y_ABOVE_GROUND); no height offset.
+      // ── 1. Restore original transform ────────────────────────────────────
       heightOffset = 0
-
-      // ── 2. Reset model transform ─────────────────────────────────────────
-      world.setPosition(schema.terrainEntity, px, placedY, pz)
+      world.setPosition(schema.terrainEntity, placedX, placedY, placedZ)
       world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
       ecs.Scale.set(world, schema.terrainEntity,
         {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
 
-      // ── 3. Fresh GestureHandler ──────────────────────────────────────────
-      // Detaching + creating new clears baseScale, initSpread, lastX/Y etc.
+      // ── 2. Fresh GestureHandler ───────────────────────────────────────────
       gestures?.detach()
       gestures = new GestureHandler(schema.terrainEntity, world, THREE)
       gestures.attach()
 
-      // ── 4. Reinitialise billboards ───────────────────────────────────────
-      // dispose() removes sprites from scene; init() re-traverses the terrain
-      // object at its new world position and attaches fresh sprites.
+      // ── 3. Reinitialise billboards ────────────────────────────────────────
       boards.dispose(world.three.scene)
       const obj = getTerrainObj()
       if (obj) {
@@ -186,9 +158,7 @@ ecs.registerComponent({
         registry.register(names)
       }
 
-      // ── 5. Re-register reset button ──────────────────────────────────────
-      // showResetButton() auto-hides the button on click before calling the
-      // callback, so we must re-show it once the reset is complete.
+      // ── 4. Re-register reset button ───────────────────────────────────────
       reRegisterResetBtn()
     }
 
@@ -204,8 +174,6 @@ ecs.registerComponent({
         if (ecs.Hidden.has(world, schema.terrainEntity))
           ecs.Hidden.remove(world, schema.terrainEntity)
         ui.showLoader()
-        // PNG fullscreen button visible from the start.
-        // X close button added to DOM now (hidden), revealed after fs entered.
         ui.showFullscreenButton()
         ui.showCloseButton()
       })
@@ -254,10 +222,13 @@ ecs.registerComponent({
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        // Capture the Y from the hit-test placement; used by performReset.
+        // Snapshot the exact world position where scanning placed the model.
+        // This is the single source of truth for reset — never recomputed.
         const initPos = world.transform.getWorldPosition(schema.terrainEntity)
-        placedY       = initPos.y   // = hit.y + Y_ABOVE_GROUND
-        heightOffset  = 0
+        placedX      = initPos.x
+        placedY      = initPos.y   // = hit.y + Y_ABOVE_GROUND
+        placedZ      = initPos.z
+        heightOffset = 0
 
         boards.dispose(world.three.scene)
         const obj = getTerrainObj()
@@ -278,14 +249,8 @@ ecs.registerComponent({
           world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
         })
 
-        // Reset button: uses a named function so it can re-register itself
-        // after each soft reset without reloading the page.
         const registerResetBtn = () => {
-          ui.showResetButton(() => {
-            // Button auto-hides itself before calling here.
-            // performReset will call registerResetBtn() when done.
-            performReset(registerResetBtn)
-          })
+          ui.showResetButton(() => performReset(registerResetBtn))
         }
         registerResetBtn()
 
