@@ -1,261 +1,200 @@
-import * as ecs from '@8thwall/ecs'
-import {GestureHandler}                                   from './gesture-handler'
-import {ArUiOverlay, requestFullscreenNow,
-        maintainFullscreen, installViewportFix}           from './ar-ui-overlay'
-import {BillboardManager}                                 from './billboard-manager'
-import {ExperienceRegistry}                               from './experience-registry'
-import {Viewer360}                                        from './viewer-360'
-import {checkArSupport, checkCameraAccess}                from './device-check'
+// gesture-handler.ts
+//
+// Constructor matches terrain-tap-place.ts exactly:
+//   new GestureHandler(terrainEid, world, THREE)
+//   gestures.attach()
+//   gestures.detach()
+//
+// Bugs fixed vs previous versions:
+//   1. Constructor arg order was wrong (world/THREE/terrainEid) — now (terrainEid/world/THREE)
+//   2. Touch not detected: listen on `document` with { passive:false }, not `window`
+//      A full-screen HTML overlay with pointer-events:auto swallows window listeners.
+//      document.addEventListener fires BEFORE HTML elements can cancel the event.
+//   3. Direction stale after rotation/reset: snapshot camera orientation at touchstart,
+//      not per-frame. After reset + device rotation, the next touchstart captures the
+//      current facing, so "finger up" always means "direction you're now looking".
 
-// ── Install orientation fix ASAP ─────────────────────────────────────────────
-installViewportFix()
+const HORIZONTAL_SENSITIVITY = 0.003
+const DEPTH_SENSITIVITY      = 0.003
+const SCALE_SENSITIVITY      = 0.01
+const MIN_SCALE              = 0.1
+const MAX_SCALE              = 5.0
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.58
-const Y_ABOVE_GROUND = 1.0
-const HIDDEN_SCALE   = 0.00001
+// Touches that land on elements with this attribute (or their children)
+// are ignored by the gesture handler so UI controls remain usable.
+// Usage in ArUiOverlay HTML: add data-ar-ui to the #ar-bottom-bar container.
+const UI_ATTR = 'data-ar-ui'
 
-// ── Per-hotspot scale overrides ───────────────────────────────────────────────
-const HOTSPOT_SCALE_OVERRIDES: Record<string, number> = {
-  'ZEMOLA': 0.9,
-  'ERTO':   0.9,
-  'CASSO':  0.9,
-}
+interface Vec2 { x: number; z: number }
+interface Pt   { x: number; y: number }
 
-// ─────────────────────────────────────────────────────────────────────────────
+export class GestureHandler {
+  private terrainEid: number
+  private world:      any
+  private THREE:      any
 
-function isModelReady(world: any, terrainEid: any): boolean {
-  const obj = world.three.entityToObject.get(terrainEid)
-  if (!obj) return false
-  let ready = false
-  obj.traverse((child: any) => {
-    if (ready) return
-    if (child.isMesh && child.geometry?.attributes &&
-        Object.keys(child.geometry.attributes).length > 0) ready = true
-  })
-  return ready
-}
+  // current and previous touch positions per identifier
+  private activeTouches = new Map<number, Pt>()
+  private prevTouches   = new Map<number, Pt>()
+  private lastPinchDist: number | null = null
 
-function offsetTowardCamera(
-  THREE: any, hitX: number, hitZ: number, camX: number, camZ: number, offset: number,
-): {x: number; z: number} {
-  const dir = new THREE.Vector3(camX - hitX, 0, camZ - hitZ)
-  if (dir.lengthSq() < 0.0001) return {x: hitX, z: hitZ}
-  dir.normalize()
-  return {x: hitX + dir.x * offset, z: hitZ + dir.z * offset}
-}
+  // Camera-relative direction snapshot taken at the first touchstart of each gesture.
+  // "finger up" = gestFwd direction in world XZ.
+  private gestFwd:   Vec2 = { x: 0, z: -1 }
+  private gestRight: Vec2 = { x: 1, z:  0 }
 
-function disableAbsoluteScale(world: any, terrainEid: any): void {
-  try {
-    const ecs_ = (window as any).ecs ?? ecs
-    for (const name of ['absolute-scale', 'absoluteScale', 'AbsoluteScale']) {
-      const comp = ecs_[name] ?? world.components?.[name]
-      if (comp?.has?.(world, terrainEid)) { comp.remove(world, terrainEid); break }
-    }
-  } catch (_) {}
-}
+  private _bStart: (e: TouchEvent) => void
+  private _bMove:  (e: TouchEvent) => void
+  private _bEnd:   (e: TouchEvent) => void
 
-// ─────────────────────────────────────────────────────────────────────────────
+  // ── Constructor matches terrain-tap-place.ts ──────────────────────────────
+  constructor(terrainEid: number, world: any, THREE: any) {
+    this.terrainEid = terrainEid
+    this.world      = world
+    this.THREE      = THREE
+    this._bStart    = this._onStart.bind(this)
+    this._bMove     = this._onMove .bind(this)
+    this._bEnd      = this._onEnd  .bind(this)
+  }
 
-ecs.registerComponent({
-  name: 'terrain-tap-place',
-  schema:         {ground: ecs.eid, terrainEntity: ecs.eid},
-  schemaDefaults: {},
-  data:           {placed: ecs.boolean},
+  // ── Public API ────────────────────────────────────────────────────────────
 
-  stateMachine: ({world, eid, schemaAttribute, dataAttribute}) => {
-    const schema  = schemaAttribute.get(eid)
-    const {THREE} = window as any
+  attach(): void {
+    this.activeTouches.clear()
+    this.prevTouches.clear()
+    this.lastPinchDist = null
+    // document listeners receive events BEFORE any HTML overlay can swallow them.
+    // passive:false lets us call preventDefault() in _onMove.
+    document.addEventListener('touchstart',  this._bStart, { passive: false })
+    document.addEventListener('touchmove',   this._bMove,  { passive: false })
+    document.addEventListener('touchend',    this._bEnd,   { passive: false })
+    document.addEventListener('touchcancel', this._bEnd,   { passive: false })
+  }
 
-    let gestures: GestureHandler | null = null
-    let absoluteScaleDisabled           = false
-    let viewing360                      = false
+  detach(): void {
+    document.removeEventListener('touchstart',  this._bStart)
+    document.removeEventListener('touchmove',   this._bMove)
+    document.removeEventListener('touchend',    this._bEnd)
+    document.removeEventListener('touchcancel', this._bEnd)
+    this.activeTouches.clear()
+    this.prevTouches.clear()
+    this.lastPinchDist = null
+  }
 
-    let placedY      = 0
-    let heightOffset = 0
+  // ── Direction snapshot ────────────────────────────────────────────────────
 
-    const ui       = new ArUiOverlay()
-    const registry = new ExperienceRegistry()
-    const viewer   = new Viewer360(THREE)
+  private _snapshotDirection(): void {
+    const cam = this.world?.three?.camera
+    if (!cam) return
 
-    const boards = new BillboardManager(THREE, {
-      baseSize:       0.35,
-      verticalOffset: 0.025,
-      debug:          false,
-      scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
-      onHotspotTap: (name) => {
-        if (viewing360) return
-        viewing360 = true
+    const fwd = new this.THREE.Vector3(0, 0, -1)
+    fwd.applyQuaternion(cam.quaternion)
+    fwd.y = 0
+    if (fwd.lengthSq() < 1e-6) return
+    fwd.normalize()
 
-        gestures?.detach()
-        ui.hideResetButton()
-        ui.hideRotationBar()
-        ui.hideHeightBar()
-        ui.hideGestureHint()
+    this.gestFwd   = { x: fwd.x, z: fwd.z }
+    this.gestRight = { x: fwd.z, z: -fwd.x }   // 90° CW around Y
+  }
 
-        viewer.open(name, registry, () => {
-          viewing360 = false
-          performReset()
-        })
-      },
-    })
+  // ── UI target filter ──────────────────────────────────────────────────────
 
-    const doReady  = ecs.defineTrigger()
-    const doPlaced = ecs.defineTrigger()
+  private _isUiTarget(e: TouchEvent): boolean {
+    const el = e.target as HTMLElement | null
+    if (!el) return false
+    return (
+      el.tagName === 'BUTTON' ||
+      el.tagName === 'INPUT'  ||
+      el.tagName === 'SELECT' ||
+      el.closest(`[${UI_ATTR}]`) !== null
+    )
+  }
 
-    const getTerrainObj = () =>
-      (world.three.entityToObject as Map<any, any>).get(schema.terrainEntity) ?? null
+  // ── Touch handlers ────────────────────────────────────────────────────────
 
-    const hideModel = () => {
-      world.setPosition(schema.terrainEntity, 0, -9999, 0)
-      world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
-      ecs.Scale.set(world, schema.terrainEntity,
-        {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
-    }
+  private _onStart(e: TouchEvent): void {
+    if (this._isUiTarget(e)) return
 
-    // ── Place model at current ground hit ─────────────────────────────────
-    // Raycasts from the camera entity right now. Places the model in front
-    // of the user with the same offset + height used at initial placement,
-    // and rotates it to face the camera.
-    const placeAtCurrentHit = (): boolean => {
-      const hits       = world.raycastFrom(eid)
-      const groundHits = hits.filter((h: any) => h.eid === schema.ground)
-      if (groundHits.length === 0) return false
+    const wasEmpty = this.activeTouches.size === 0
 
-      const hit = groundHits[0].point
-      const cam = ecs.Position.get(world, eid)
-      const {x: px, z: pz} = offsetTowardCamera(
-        THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET,
-      )
-
-      placedY      = hit.y + Y_ABOVE_GROUND
-      heightOffset = 0
-
-      // Rotate model to face the camera at this placement
-      const facingAngle = Math.atan2(cam.x - px, cam.z - pz)
-      const half        = facingAngle / 2
-
-      world.setPosition(schema.terrainEntity, px, placedY, pz)
-      world.setQuaternion(schema.terrainEntity, 0, Math.sin(half), 0, Math.cos(half))
-      ecs.Scale.set(world, schema.terrainEntity,
-        {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
-
-      return true
+    for (const t of Array.from(e.changedTouches)) {
+      const pt: Pt = { x: t.clientX, y: t.clientY }
+      this.activeTouches.set(t.identifier, pt)
+      this.prevTouches.set(t.identifier, { ...pt })
     }
 
-    // ── Re-show all placed-state AR controls ──────────────────────────────
-    const showControls = () => {
-      ui.showRotationBar((deltaRad: number) => {
-        const half = deltaRad * 0.5
-        world.transform.rotateSelf(schema.terrainEntity,
-          {x: 0, y: Math.sin(half), z: 0, w: Math.cos(half)})
-      })
+    // Snapshot camera direction at the first touch of every new gesture.
+    // This is the fix for the "direction doesn't update after reset" bug:
+    // reset → device rotates → lift finger → new touchstart → fresh snapshot.
+    if (wasEmpty) this._snapshotDirection()
 
-      ui.showHeightBar((delta: number) => {
-        heightOffset = Math.max(0, heightOffset + delta)
-        const pos = world.transform.getWorldPosition(schema.terrainEntity)
-        world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
-      })
+    if (this.activeTouches.size === 2) {
+      const [a, b] = Array.from(this.activeTouches.values())
+      this.lastPinchDist = Math.hypot(b.x - a.x, b.y - a.y)
+    }
+  }
 
-      ui.showResetButton(() => performReset())
-      ui.showGestureHint()
+  private _onMove(e: TouchEvent): void {
+    if (this._isUiTarget(e)) return
+    e.preventDefault()
+
+    for (const t of Array.from(e.changedTouches)) {
+      const existing = this.activeTouches.get(t.identifier)
+      if (existing) this.prevTouches.set(t.identifier, { ...existing })
+      this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY })
     }
 
-    // ── Soft scene reset ──────────────────────────────────────────────────
-    // Fresh raycast from current camera position → new placedY, new model
-    // facing. GestureHandler is recreated so its internal pan/scale state
-    // is clean. Pan axes are computed live in GestureHandler every frame
-    // from the camera quaternion, so no stale state to clear here.
-    const performReset = async (): Promise<void> => {
-      placeAtCurrentHit()
-
-      gestures?.detach()
-      gestures = new GestureHandler(schema.terrainEntity, world, THREE)
-      gestures.attach()
-
-      boards.dispose(world.three.scene)
-      const obj = getTerrainObj()
-      if (obj) {
-        const names = await boards.init(obj, world.three.scene)
-        registry.register(names)
+    if (this.activeTouches.size >= 2) {
+      const [a, b] = Array.from(this.activeTouches.values())
+      const dist   = Math.hypot(b.x - a.x, b.y - a.y)
+      if (this.lastPinchDist !== null) {
+        this._applyScale((dist - this.lastPinchDist) * SCALE_SENSITIVITY)
       }
+      this.lastPinchDist = dist
 
-      showControls()
+    } else if (this.activeTouches.size === 1) {
+      const [id]  = Array.from(this.activeTouches.keys())
+      const curr  = this.activeTouches.get(id)!
+      const prev  = this.prevTouches.get(id)
+      if (!prev) return
+      const dx = curr.x - prev.x
+      const dy = curr.y - prev.y
+      if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return
+      this._applyPan(dx, dy)
     }
+  }
 
-    // ─────────────────────────────────────────────────────────────────────────
+  private _onEnd(e: TouchEvent): void {
+    for (const t of Array.from(e.changedTouches)) {
+      this.activeTouches.delete(t.identifier)
+      this.prevTouches.delete(t.identifier)
+    }
+    if (this.activeTouches.size < 2) this.lastPinchDist = null
+  }
 
-    // ── loading ───────────────────────────────────────────────────────────
+  // ── Transform appliers ────────────────────────────────────────────────────
 
-    ecs.defineState('loading').initial()
-      .onEnter(() => {
-        checkArSupport()
-        checkCameraAccess(() => {}, () => {})
-        hideModel()
-        if (ecs.Hidden.has(world, schema.terrainEntity))
-          ecs.Hidden.remove(world, schema.terrainEntity)
-        ui.showLoader()
-        ui.showFullscreenButton()
-        ui.showCloseButton()
-      })
-      .onTick(() => {
-        if (isModelReady(world, schema.terrainEntity)) {
-          if (!absoluteScaleDisabled) {
-            disableAbsoluteScale(world, schema.terrainEntity)
-            absoluteScaleDisabled = true
-          }
-          doReady.trigger()
-        }
-      })
-      .onTrigger(doReady, 'scanning')
+  private _applyPan(dx: number, dy: number): void {
+    const obj = this.world.three.entityToObject.get(this.terrainEid)
+    if (!obj) return
 
-    // ── scanning ──────────────────────────────────────────────────────────
+    const wp = new this.THREE.Vector3()
+    obj.getWorldPosition(wp)
 
-    ecs.defineState('scanning')
-      .onEnter(() => {
-        ui.hideLoader()
-        hideModel()
-        dataAttribute.cursor(eid).placed = false
-        heightOffset = 0
-      })
-      .onTick(() => {
-        if (placeAtCurrentHit()) doPlaced.trigger()
-      })
-      .onTrigger(doPlaced, 'placed')
+    this.world.setPosition(
+      this.terrainEid,
+      wp.x + this.gestRight.x * (dx  * HORIZONTAL_SENSITIVITY)
+           + this.gestFwd.x   * (-dy * DEPTH_SENSITIVITY),
+      wp.y,
+      wp.z + this.gestRight.z * (dx  * HORIZONTAL_SENSITIVITY)
+           + this.gestFwd.z   * (-dy * DEPTH_SENSITIVITY),
+    )
+  }
 
-    // ── placed ────────────────────────────────────────────────────────────
-
-    ecs.defineState('placed')
-      .onEnter(async () => {
-        gestures?.detach()
-        gestures = new GestureHandler(schema.terrainEntity, world, THREE)
-        gestures.attach()
-
-        boards.dispose(world.three.scene)
-        const obj = getTerrainObj()
-        if (obj) {
-          const names = await boards.init(obj, world.three.scene)
-          registry.register(names)
-        }
-
-        showControls()
-        dataAttribute.cursor(eid).placed = true
-      })
-      .onTick(() => {
-        if (viewing360) return
-        const obj = getTerrainObj()
-        if (obj) boards.update(obj)
-      })
-      .onExit(() => {
-        gestures?.detach(); gestures = null
-        boards.dispose(world.three.scene)
-        ui.hideResetButton()
-        ui.hideRotationBar()
-        ui.hideHeightBar()
-        ui.hideGestureHint()
-      })
-  },
-
-  remove: () => {},
-})
+  private _applyScale(delta: number): void {
+    const obj = this.world.three.entityToObject.get(this.terrainEid)
+    if (!obj) return
+    const next = Math.min(MAX_SCALE, Math.max(MIN_SCALE, obj.scale.x + delta))
+    this.world.setScale(this.terrainEid, next, next, next)
+  }
+}
