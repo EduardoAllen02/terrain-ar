@@ -83,12 +83,8 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
-    // ── Original placement position (captured once in placed.onEnter) ─────
-    // These are the exact XYZ where the model landed after the first hit-test.
-    // Reset always returns to these coordinates — no recomputation needed.
-    let placedX      = 0
+    // placedY tracks the base Y for the height bar (recalculated on reset).
     let placedY      = 0
-    let placedZ      = 0
     let heightOffset = 0
 
     const ui       = new ArUiOverlay()
@@ -127,30 +123,53 @@ ecs.registerComponent({
         {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
     }
 
-    // ── Soft scene reset ──────────────────────────────────────────────────
+    // ── Place model at current ground hit ─────────────────────────────────
     //
-    // Restores the scene to exactly the state it was in right after the
-    // first hit-test placement:
-    //  • Position  → original placedX/Y/Z (no heightOffset)
-    //  • Rotation  → identity quaternion
-    //  • Scale     → INITIAL_SCALE
-    //  • Gestures  → fresh GestureHandler (clears all accumulated pan/scale)
-    //  • Billboards → disposed + reinitialised at new world position
+    // Shared by both the initial scanning placement and every subsequent
+    // reset. Raycasts from the camera entity right now, finds the ground,
+    // applies the same CAMERA_OFFSET + Y_ABOVE_GROUND used at startup.
+    // Returns true if a ground hit was found and the model was placed.
     //
-    const performReset = async (reRegisterResetBtn: () => void): Promise<void> => {
-      // ── 1. Restore original transform ────────────────────────────────────
+    const placeAtCurrentHit = (): boolean => {
+      const hits       = world.raycastFrom(eid)
+      const groundHits = hits.filter((h: any) => h.eid === schema.ground)
+      if (groundHits.length === 0) return false
+
+      const hit = groundHits[0].point
+      const cam = ecs.Position.get(world, eid)
+      const {x: px, z: pz} = offsetTowardCamera(
+        THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET,
+      )
+
+      placedY      = hit.y + Y_ABOVE_GROUND   // new ground reference for height bar
       heightOffset = 0
-      world.setPosition(schema.terrainEntity, placedX, placedY, placedZ)
+
+      world.setPosition(schema.terrainEntity, px, placedY, pz)
       world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
       ecs.Scale.set(world, schema.terrainEntity,
         {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
 
-      // ── 2. Fresh GestureHandler ───────────────────────────────────────────
+      return true
+    }
+
+    // ── Soft scene reset ──────────────────────────────────────────────────
+    //
+    // Re-runs a ground raycast from wherever the camera is NOW, places the
+    // model in front of the user exactly as the initial hit-test did, then
+    // resets all controls to their default state.
+    //
+    const performReset = async (reRegisterResetBtn: () => void): Promise<void> => {
+      // Place at current camera hit (recalculates placedY and heightOffset).
+      // If no ground is detected (rare edge case), we skip silently and just
+      // re-register the button so the user can try again.
+      placeAtCurrentHit()
+
+      // Fresh GestureHandler — clears all accumulated pan/scale/spread state.
       gestures?.detach()
       gestures = new GestureHandler(schema.terrainEntity, world, THREE)
       gestures.attach()
 
-      // ── 3. Reinitialise billboards ────────────────────────────────────────
+      // Reinitialise billboards at the new world position.
       boards.dispose(world.three.scene)
       const obj = getTerrainObj()
       if (obj) {
@@ -158,7 +177,6 @@ ecs.registerComponent({
         registry.register(names)
       }
 
-      // ── 4. Re-register reset button ───────────────────────────────────────
       reRegisterResetBtn()
     }
 
@@ -198,19 +216,7 @@ ecs.registerComponent({
         heightOffset = 0
       })
       .onTick(() => {
-        const hits       = world.raycastFrom(eid)
-        const groundHits = hits.filter((h: any) => h.eid === schema.ground)
-        if (groundHits.length === 0) return
-        const hit = groundHits[0].point
-        const cam = ecs.Position.get(world, eid)
-        const {x: px, z: pz} = offsetTowardCamera(
-          THREE, hit.x, hit.z, cam.x, cam.z, CAMERA_OFFSET,
-        )
-        world.setPosition(schema.terrainEntity, px, hit.y + Y_ABOVE_GROUND, pz)
-        world.setQuaternion(schema.terrainEntity, 0, 0, 0, 1)
-        ecs.Scale.set(world, schema.terrainEntity,
-          {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
-        doPlaced.trigger()
+        if (placeAtCurrentHit()) doPlaced.trigger()
       })
       .onTrigger(doPlaced, 'placed')
 
@@ -222,13 +228,8 @@ ecs.registerComponent({
         gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
-        // Snapshot the exact world position where scanning placed the model.
-        // This is the single source of truth for reset — never recomputed.
-        const initPos = world.transform.getWorldPosition(schema.terrainEntity)
-        placedX      = initPos.x
-        placedY      = initPos.y   // = hit.y + Y_ABOVE_GROUND
-        placedZ      = initPos.z
-        heightOffset = 0
+        // placedY was set by placeAtCurrentHit() in scanning.onTick.
+        // heightOffset is already 0.
 
         boards.dispose(world.three.scene)
         const obj = getTerrainObj()
