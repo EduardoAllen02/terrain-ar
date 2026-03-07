@@ -17,7 +17,7 @@ window.addEventListener('click',      () => requestFullscreenNow(), {once: true}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const CAMERA_OFFSET  = 0.6
-const INITIAL_SCALE  = 0.38
+const INITIAL_SCALE  = 0.78
 const Y_ABOVE_GROUND = 1.0
 const HIDDEN_SCALE   = 0.00001
 
@@ -30,9 +30,9 @@ const HIDDEN_SCALE   = 0.00001
 //   < 1.0  →  smaller than the rest
 //
 const HOTSPOT_SCALE_OVERRIDES: Record<string, number> = {
-  'ZEMOLA':     1,
-  'ERTO':     0.85,
-  'CASSO':  0.85,
+  'ZEMOLA':     0.9,
+  'ERTO':     0.9,
+  'CASSO':  0.9,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
