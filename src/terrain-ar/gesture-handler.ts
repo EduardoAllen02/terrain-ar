@@ -14,6 +14,10 @@
  *   new GestureHandler(terrainEid, world, THREE)
  *   gestures.attach()
  *   gestures.detach()
+ *
+ * Camera lookup uses scene.traverse (same as the original v5 that worked).
+ * world.three.camera was tried but caused movement to stop entirely,
+ * so we stay with traverse which is proven to return a valid camera object.
  */
 
 const SCALE_MIN  = 0.02
@@ -23,19 +27,17 @@ export class GestureHandler {
   private active    = false
   private listeners: Array<[EventTarget, string, EventListener]> = []
 
-  // ── single-finger drag state ───────────────────────────────────────────────
-  // dragPlane   : horizontal THREE.Plane at the model's Y when drag started
+  // ── single-finger drag state ──────────────────────────────────────────────
+  // dragPlaneY  : world Y of the horizontal drag plane (model Y at drag start)
   // dragOffset  : model world pos minus the first ray-hit on the plane
-  //               so the model doesn't snap to the finger — it preserves
-  //               the distance between where you touched and the model centre
+  //               so the model doesn't snap its centre to the finger
   private sf: {
     id:         number
-    raycaster:  any        // THREE.Raycaster (reused across moves)
-    dragPlane:  any        // THREE.Plane
-    dragOffset: any        // THREE.Vector3
+    dragPlaneY: number
+    dragOffset: any     // THREE.Vector3  (XZ only, Y always 0)
   } | null = null
 
-  // ── two-finger pinch state ─────────────────────────────────────────────────
+  // ── two-finger pinch state ────────────────────────────────────────────────
   private tf: {
     idA: number; idB: number
     baseScale: number; initSpread: number; prevSpread: number
@@ -66,7 +68,7 @@ export class GestureHandler {
     this.tf = null
   }
 
-  // ── Internals ─────────────────────────────────────────────────────────────
+  // ── Private helpers ───────────────────────────────────────────────────────
 
   private _on(
     target: EventTarget, type: string, fn: EventListener,
@@ -76,27 +78,42 @@ export class GestureHandler {
     this.listeners.push([target, type, fn])
   }
 
-  // Convert a clientX/Y touch to a NDC Vector2 for THREE.Raycaster
+  // Returns the first camera found by scene.traverse — same method used in
+  // the original v5 which was proven to detect touches and move the model.
+  private _getCamera(): any {
+    let cam: any = null
+    this.world.three.scene.traverse((c: any) => { if (c.isCamera && !cam) cam = c })
+    return cam
+  }
+
+  // Convert a clientX/Y touch position to NDC [-1..1] for THREE.Raycaster.
   private _toNDC(clientX: number, clientY: number): any {
     return new this.THREE.Vector2(
-      ( clientX / window.innerWidth)  *  2 - 1,
-      -(clientY / window.innerHeight) *  2 + 1,
+      ( clientX / window.innerWidth)  * 2 - 1,
+      -(clientY / window.innerHeight) * 2 + 1,
     )
   }
 
-  // Cast a ray through NDC coords against a THREE.Plane.
-  // Returns the intersection THREE.Vector3, or null if the ray is parallel.
-  private _rayHit(ndc: any, plane: any): any | null {
-    const cam = this.world.three.camera
+  /**
+   * Cast a ray from the camera through NDC coords onto a horizontal plane
+   * at world Y = planeY. Returns the THREE.Vector3 hit point, or null if
+   * the ray is parallel to the plane (extremely unlikely in normal AR use).
+   */
+  private _rayHitAtY(clientX: number, clientY: number, planeY: number): any | null {
+    const cam = this._getCamera()
     if (!cam) return null
-    const ray = new this.THREE.Raycaster()
-    ray.setFromCamera(ndc, cam)
-    const hit = new this.THREE.Vector3()
-    const ok  = ray.ray.intersectPlane(plane, hit)
+
+    const raycaster = new this.THREE.Raycaster()
+    raycaster.setFromCamera(this._toNDC(clientX, clientY), cam)
+
+    // Horizontal plane: normal = (0,1,0), constant = -planeY
+    const plane = new this.THREE.Plane(new this.THREE.Vector3(0, 1, 0), -planeY)
+    const hit   = new this.THREE.Vector3()
+    const ok    = raycaster.ray.intersectPlane(plane, hit)
     return ok ? hit : null
   }
 
-  private _getModelWorldPos(): any {
+  private _getModelWorldPos(): any | null {
     const obj = this.world.three.entityToObject.get(this.terrainEid)
     if (!obj) return null
     const v = new this.THREE.Vector3()
@@ -111,7 +128,7 @@ export class GestureHandler {
 
     if (touches.length >= 2) {
       // ── two fingers: start pinch ──────────────────────────────────────────
-      this.sf = null   // cancel any ongoing drag
+      this.sf = null
       if (!this.tf) {
         const a = touches[0], b = touches[1]
         const spread = this._spread(a, b)
@@ -129,23 +146,14 @@ export class GestureHandler {
       const mPos = this._getModelWorldPos()
       if (!mPos) return
 
-      // Horizontal plane at the model's current Y
-      const plane = new this.THREE.Plane(new this.THREE.Vector3(0, 1, 0), -mPos.y)
-      const ndc   = this._toNDC(t.clientX, t.clientY)
-      const hit   = this._rayHit(ndc, plane)
+      const planeY = mPos.y
+      const hit    = this._rayHitAtY(t.clientX, t.clientY, planeY)
       if (!hit) return
 
-      // Offset = model centre − touch hit  (preserved throughout the drag so
-      // the model doesn't snap its centre to the finger)
-      const offset = new this.THREE.Vector3().subVectors(mPos, hit)
-      offset.y = 0   // only XZ offset matters; Y is kept fixed by the plane
+      // Offset keeps the model from snapping its centre to the finger.
+      const offset = new this.THREE.Vector3(mPos.x - hit.x, 0, mPos.z - hit.z)
 
-      this.sf = {
-        id:         t.identifier,
-        raycaster:  new this.THREE.Raycaster(),
-        dragPlane:  plane,
-        dragOffset: offset,
-      }
+      this.sf = { id: t.identifier, dragPlaneY: planeY, dragOffset: offset }
     }
   }
 
@@ -171,16 +179,14 @@ export class GestureHandler {
       const t = touches.find(t => t.identifier === this.sf!.id)
       if (!t) return
 
-      const ndc = this._toNDC(t.clientX, t.clientY)
-      const hit = this._rayHit(ndc, this.sf.dragPlane)
+      const hit = this._rayHitAtY(t.clientX, t.clientY, this.sf.dragPlaneY)
       if (!hit) return
 
-      const newPos = hit.add(this.sf.dragOffset)
       this.world.setPosition(
         this.terrainEid,
-        newPos.x,
-        this.sf.dragPlane.constant * -1,   // keep original Y (plane stores -Y as constant)
-        newPos.z,
+        hit.x + this.sf.dragOffset.x,
+        this.sf.dragPlaneY,
+        hit.z + this.sf.dragOffset.z,
       )
     }
   }
@@ -191,18 +197,16 @@ export class GestureHandler {
       this.sf = null
       this.tf = null
     } else if (remaining.length === 1) {
+      // Pinch released — restart drag from the remaining finger
       this.tf = null
-      // Restart drag from the remaining finger
       const t    = remaining[0]
       const mPos = this._getModelWorldPos()
-      if (!mPos) return
-      const plane  = new this.THREE.Plane(new this.THREE.Vector3(0, 1, 0), -mPos.y)
-      const ndc    = this._toNDC(t.clientX, t.clientY)
-      const hit    = this._rayHit(ndc, plane)
-      if (!hit) { this.sf = null; return }
-      const offset = new this.THREE.Vector3().subVectors(mPos, hit)
-      offset.y = 0
-      this.sf = {id: t.identifier, raycaster: new this.THREE.Raycaster(), dragPlane: plane, dragOffset: offset}
+      if (!mPos) { this.sf = null; return }
+      const planeY = mPos.y
+      const hit    = this._rayHitAtY(t.clientX, t.clientY, planeY)
+      if (!hit)    { this.sf = null; return }
+      const offset = new this.THREE.Vector3(mPos.x - hit.x, 0, mPos.z - hit.z)
+      this.sf = { id: t.identifier, dragPlaneY: planeY, dragOffset: offset }
     }
   }
 
