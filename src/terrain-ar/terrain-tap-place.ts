@@ -75,12 +75,6 @@ ecs.registerComponent({
     let placedY      = 0
     let heightOffset = 0
 
-    // Pan axes — computed in placeAtCurrentHit() from the camera→model
-    // direction at that moment. Fixed until the next placement/reset so
-    // controls are always consistent regardless of user rotation.
-    let panFwd:   {x: number; z: number} = {x: 0, z: 1}
-    let panRight: {x: number; z: number} = {x: 1, z: 0}
-
     const ui       = new ArUiOverlay()
     const registry = new ExperienceRegistry()
     const viewer   = new Viewer360(THREE)
@@ -121,8 +115,9 @@ ecs.registerComponent({
     }
 
     // ── Place model at current ground hit ─────────────────────────────────
-    // Also bakes panFwd / panRight from the camera→model direction so the
-    // gesture controls are always aligned to this placement orientation.
+    // Raycasts from the camera entity right now. Places the model in front
+    // of the user with the same offset + height used at initial placement,
+    // and rotates it to face the camera.
     const placeAtCurrentHit = (): boolean => {
       const hits       = world.raycastFrom(eid)
       const groundHits = hits.filter((h: any) => h.eid === schema.ground)
@@ -137,7 +132,7 @@ ecs.registerComponent({
       placedY      = hit.y + Y_ABOVE_GROUND
       heightOffset = 0
 
-      // Facing quaternion: model looks toward camera
+      // Rotate model to face the camera at this placement
       const facingAngle = Math.atan2(cam.x - px, cam.z - pz)
       const half        = facingAngle / 2
 
@@ -145,17 +140,6 @@ ecs.registerComponent({
       world.setQuaternion(schema.terrainEntity, 0, Math.sin(half), 0, Math.cos(half))
       ecs.Scale.set(world, schema.terrainEntity,
         {x: INITIAL_SCALE, y: INITIAL_SCALE, z: INITIAL_SCALE})
-
-      // Bake pan axes from camera→model direction projected on XZ.
-      // fwd  = direction from camera toward placed model (user pushes model away)
-      // right = fwd rotated 90° clockwise around Y
-      const dfx = px - cam.x
-      const dfz = pz - cam.z
-      const len  = Math.sqrt(dfx * dfx + dfz * dfz)
-      if (len > 0.0001) {
-        panFwd   = {x: dfx / len,  z: dfz / len}
-        panRight = {x: dfz / len,  z: -dfx / len}  // 90° CW rotation
-      }
 
       return true
     }
@@ -179,12 +163,15 @@ ecs.registerComponent({
     }
 
     // ── Soft scene reset ──────────────────────────────────────────────────
+    // Fresh raycast from current camera position → new placedY, new model
+    // facing. GestureHandler is recreated so its internal pan/scale state
+    // is clean. Pan axes are computed live in GestureHandler every frame
+    // from the camera quaternion, so no stale state to clear here.
     const performReset = async (): Promise<void> => {
-      placeAtCurrentHit()   // recalculates placedY, panFwd, panRight
+      placeAtCurrentHit()
 
-      // New GestureHandler with freshly baked axes
       gestures?.detach()
-      gestures = new GestureHandler(schema.terrainEntity, world, THREE, panFwd, panRight)
+      gestures = new GestureHandler(schema.terrainEntity, world, THREE)
       gestures.attach()
 
       boards.dispose(world.three.scene)
@@ -241,9 +228,8 @@ ecs.registerComponent({
 
     ecs.defineState('placed')
       .onEnter(async () => {
-        // panFwd / panRight already set by placeAtCurrentHit() in scanning.onTick
         gestures?.detach()
-        gestures = new GestureHandler(schema.terrainEntity, world, THREE, panFwd, panRight)
+        gestures = new GestureHandler(schema.terrainEntity, world, THREE)
         gestures.attach()
 
         boards.dispose(world.three.scene)
