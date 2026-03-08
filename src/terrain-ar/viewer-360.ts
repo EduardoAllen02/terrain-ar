@@ -1,12 +1,56 @@
-import {ExperienceRegistry} from './experience-registry'
-import {probeGyroscope}     from './device-check'
+/**
+ * Viewer360 — v2
+ *
+ * Multi-image per hotspot with a sliding-window texture cache.
+ *
+ * ── Directory layout ─────────────────────────────────────────────────────────
+ *
+ *   assets/360/manifest.json
+ *   assets/360/<folder name on disk>/<image stem>.jpg
+ *
+ * ── manifest.json format ─────────────────────────────────────────────────────
+ *
+ *   {
+ *     "BLENDER_HOTSPOT_NAME": {
+ *       "folder": "Exact folder name on disk",
+ *       "images": ["stem1", "stem2", ...]
+ *     },
+ *     ...
+ *   }
+ *
+ *   Keys    = hotspot names as in Blender (after hotspot_ prefix), e.g. "ANDREIS"
+ *   folder  = exact folder name inside assets/360/ on the server
+ *   images  = filename stems (no path, no .jpg extension)
+ *
+ * ── Cache policy ─────────────────────────────────────────────────────────────
+ *
+ *   • Nothing is downloaded until the user taps a hotspot.
+ *   • On open   : load images[0], then silently prefetch images[1].
+ *   • On navigate: load images[newIdx] (may already be cached),
+ *                  prefetch images[newIdx ± 1] in background,
+ *                  dispose textures outside window [newIdx-1 … newIdx+1]
+ *                  after a short delay (600 ms) so the GPU has finished.
+ *   • The manifest is kept in memory for the Viewer360 instance lifetime.
+ *   • All textures are disposed when the viewer closes.
+ */
 
-const IMAGES_PATH = 'assets/360/'
-const IMAGE_EXT   = '.jpg'
+import {probeGyroscope} from './device-check'
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+const BASE_PATH    = 'assets/360/'
+const IMAGE_EXT    = '.jpg'
+const MANIFEST_URL = `${BASE_PATH}manifest.json`
+const CLOSE_URL    = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
+
+interface HotspotEntry { folder: string; images: string[] }
+type Manifest = Record<string, HotspotEntry>
+
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const injectStyles = (() => {
   let done = false
-  return () => {
+  return (): void => {
     if (done) return
     done = true
     const s = document.createElement('style')
@@ -22,14 +66,15 @@ const injectStyles = (() => {
         position: absolute; inset: 0;
         width: 100%; height: 100%; display: block;
       }
+
+      /* ── Top bar: Back ← and → Close tab ── */
       #v360-topbar {
         position: absolute; top: 0; left: 0; right: 0;
-        display: flex; align-items: center; justify-content: center;
+        display: flex; align-items: center; justify-content: space-between;
         padding: 18px 16px 0;
-        pointer-events: none; z-index: 2;
+        z-index: 2; pointer-events: none;
       }
       #v360-back {
-        position: absolute; left: 16px;
         display: flex; align-items: center; gap: 6px;
         background: rgba(255,255,255,0.92); border: none; border-radius: 22px;
         padding: 8px 16px 8px 10px;
@@ -41,43 +86,68 @@ const injectStyles = (() => {
         transition: background 0.15s;
       }
       #v360-back:active { background: rgba(235,248,255,0.98); }
+      #v360-close-tab {
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(255,255,255,0.92); border: none; border-radius: 50%;
+        width: 38px; height: 38px; flex-shrink: 0;
+        color: #4ab8d8; cursor: pointer; pointer-events: all;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+        -webkit-tap-highlight-color: transparent;
+        transition: background 0.15s;
+      }
+      #v360-close-tab:active { background: rgba(235,248,255,0.98); }
+
+      /* ── Side navigation buttons ── */
+      .v360-nav-btn {
+        position: absolute; top: 50%; transform: translateY(-50%);
+        z-index: 2;
+        background: rgba(255,255,255,0.92); border: none; border-radius: 22px;
+        padding: 10px 16px;
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 12px; font-weight: 600; color: #4ab8d8;
+        letter-spacing: 0.06em; text-transform: uppercase;
+        cursor: pointer;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.22);
+        -webkit-tap-highlight-color: transparent;
+        display: flex; align-items: center; gap: 6px;
+        transition: background 0.15s, opacity 0.2s, transform 0.15s;
+      }
+      .v360-nav-btn:active {
+        background: rgba(235,248,255,0.98);
+        transform: translateY(-50%) scale(0.94);
+      }
+      /* Hidden state — invisible but layout-safe */
+      .v360-nav-btn.v360-nav-hidden { opacity: 0; pointer-events: none; }
+      #v360-prev-btn { left: 14px; }
+      #v360-next-btn { right: 14px; }
+
+      /* ── Bottom: hotspot name + dots ── */
+      #v360-bottom {
+        position: absolute; bottom: 28px; left: 0; right: 0;
+        display: flex; flex-direction: column; align-items: center; gap: 10px;
+        z-index: 2; pointer-events: none;
+      }
       #v360-title {
         background: rgba(255,255,255,0.92); border-radius: 18px;
-        padding: 7px 18px;
+        padding: 7px 22px;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 13px; font-weight: 500;
-        letter-spacing: 0.12em; text-transform: uppercase; color: #4ab8d8;
+        font-size: 13px; font-weight: 600;
+        letter-spacing: 0.14em; text-transform: uppercase; color: #4ab8d8;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-        max-width: 48vw; white-space: nowrap;
+        max-width: 70vw; white-space: nowrap;
         overflow: hidden; text-overflow: ellipsis;
       }
-      .v360-nav {
-        position: absolute; top: 50%; transform: translateY(-50%);
-        z-index: 2; background: rgba(255,255,255,0.92); border: none;
-        border-radius: 50%; width: 48px; height: 48px;
-        display: flex; align-items: center; justify-content: center;
-        cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.22);
-        -webkit-tap-highlight-color: transparent;
-        transition: background 0.15s, transform 0.15s;
-      }
-      .v360-nav:active {
-        background: rgba(235,248,255,0.98);
-        transform: translateY(-50%) scale(0.93);
-      }
-      #v360-prev { left: 14px; }
-      #v360-next { right: 14px; }
-      .v360-nav svg { color: #4ab8d8; }
-      #v360-counter {
-        position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
-        display: flex; gap: 6px; z-index: 2;
-      }
+      #v360-counter { display: flex; gap: 7px; }
       .v360-dot {
         width: 6px; height: 6px; border-radius: 50%;
         background: rgba(255,255,255,0.35); transition: background 0.2s;
       }
       .v360-dot.active { background: rgba(255,255,255,0.95); }
+
+      /* ── Explore hint ── */
       #v360-hint {
-        position: absolute; bottom: 52px; left: 50%; transform: translateX(-50%);
+        position: absolute;
+        bottom: 110px; left: 50%; transform: translateX(-50%);
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 10px; font-weight: 300;
         letter-spacing: 0.18em; text-transform: uppercase;
@@ -85,6 +155,8 @@ const injectStyles = (() => {
         pointer-events: none; z-index: 2; transition: opacity 0.5s;
       }
       #v360-hint.v360-hidden { opacity: 0; }
+
+      /* ── Loading spinner ── */
       #v360-loading {
         position: absolute; inset: 0;
         display: flex; align-items: center; justify-content: center;
@@ -98,6 +170,8 @@ const injectStyles = (() => {
         animation: v360-spin 0.8s linear infinite;
       }
       @keyframes v360-spin { to { transform: rotate(360deg); } }
+
+      /* ── Gyro badge ── */
       #v360-gyro-badge {
         position: absolute; top: 72px; right: 14px;
         background: rgba(0,0,0,0.45); border-radius: 12px;
@@ -106,43 +180,72 @@ const injectStyles = (() => {
         font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
         color: rgba(255,255,255,0.55); pointer-events: none;
       }
+
+      /* ── Landscape ── */
+      @media (orientation: landscape) {
+        #v360-topbar    { padding: 10px 14px 0; }
+        #v360-back      { padding: 6px 12px 6px 8px; font-size: 12px; }
+        #v360-close-tab { width: 32px; height: 32px; }
+        .v360-nav-btn   { padding: 8px 12px; font-size: 11px; }
+        #v360-bottom    { bottom: 14px; gap: 7px; }
+        #v360-title     { font-size: 12px; padding: 5px 16px; }
+        #v360-hint      { bottom: 80px; font-size: 9px; }
+      }
     `
     document.head.appendChild(s)
   }
 })()
 
+// ── Orientation helper ────────────────────────────────────────────────────────
+
 function getOrientAngleDeg(): number {
-  const raw = window.screen?.orientation?.angle
-    ?? (window as any).orientation
-    ?? 0
-
-  const isIPad = /iPad/.test(navigator.userAgent)
-    || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
-
+  const raw = window.screen?.orientation?.angle ?? (window as any).orientation ?? 0
+  const isIPad =
+    /iPad/.test(navigator.userAgent) ||
+    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
   return isIPad ? raw - 90 : raw
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class Viewer360 {
+
+  // ── Three.js objects ──────────────────────────────────────────────────────
   private overlay:   HTMLElement | null = null
   private renderer:  any = null
   private scene:     any = null
   private camera:    any = null
-  private sphere:    any = null
+  private sphere:    any = null     // reused across texture swaps
   private texLoader: any = null
   private rafId      = 0
 
-  private texCache = new Map<string, any>()
+  // ── Manifest (persists for the life of this instance) ─────────────────────
+  private manifest:        Manifest | null = null
+  private manifestPromise: Promise<Manifest | null> | null = null
 
+  // ── Texture sliding-window cache ──────────────────────────────────────────
+  // Key: `${hotspot}/${filename}`   (filename = stem, no path, no extension)
+  // Value: loaded THREE.Texture, or null for a 404/error
+  private texCache   = new Map<string, any>()
+  private texPending = new Map<string, Promise<any>>()
+
+  // ── Per-open navigation state ─────────────────────────────────────────────
+  private currentHotspot = ''
+  private currentFolder  = ''
+  private currentImages:  string[] = []
+  private currentIdx     = 0
+
+  // ── Gyroscope ─────────────────────────────────────────────────────────────
   private _gyroHandler:   ((e: DeviceOrientationEvent) => void) | null = null
   private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
   private _gyroOk = false
-
   private _euler:   any = null
   private _q1:      any = null
   private _qOrient: any = null
   private _zee:     any = null
 
+  // ── Touch drag (fallback when no gyro) ───────────────────────────────────
   private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
@@ -150,54 +253,177 @@ export class Viewer360 {
 
   constructor(private readonly THREE: any) {}
 
-  async open(
-    name:     string,
-    registry: ExperienceRegistry,
-    onClose:  () => void,
-  ): Promise<void> {
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  /**
+   * Opens the 360 viewer for `hotspotName`.
+   * Resolves the image list from the manifest, loads the first image,
+   * then prefetches adjacent images in the background.
+   */
+  async open(hotspotName: string, onClose: () => void): Promise<void> {
     injectStyles()
-    registry.setCurrent(name)
+
+    // Resolve manifest and image list
+    const manifest = await this._loadManifest()
+    this.currentHotspot = hotspotName
+    const entry = manifest?.[hotspotName]
+    this.currentFolder  = entry?.folder  ?? hotspotName
+    this.currentImages  = entry?.images  ?? []
+    this.currentIdx     = 0
+
+    // Hotspot has no images yet — abort silently
+    if (this.currentImages.length === 0) {
+      onClose()
+      return
+    }
 
     const gyroOk = await this._requestGyroPermission()
-    this._buildOverlay(name, registry, gyroOk, onClose)
+
+    this._buildOverlay(hotspotName, gyroOk, onClose)
     this._initRenderer()
     this._startResizeHandler()
     if (gyroOk) this._startGyro()
     else         this._startTouchDrag()
     this._startLoop()
-    await this._loadImage(name)
+
+    // Load image[0] — show viewer as soon as it's ready
+    const tex = await this._fetchTexture(this.currentFolder, this.currentImages[0])
+    this._applySphereTexture(tex)
     this._hideLoading()
+    this._updateNavButtons()
+    this._updateDots()
     this._hideHintAfterDelay()
+
+    // Silently prefetch image[1] in the background
+    if (this.currentImages.length > 1) {
+      void this._fetchTexture(this.currentFolder, this.currentImages[1])
+    }
   }
 
-  private close(onClose: () => void): void {
-    cancelAnimationFrame(this.rafId)
-    this._stopGyro()
-    this._stopTouchDrag()
-    this._stopResizeHandler()
-    const el = this.overlay
-    if (el) {
-      el.classList.remove('v360-visible')
-      setTimeout(() => { el.remove(); this._fullDispose() }, 380)
+  // ── Manifest ──────────────────────────────────────────────────────────────
+
+  private async _loadManifest(): Promise<Manifest | null> {
+    if (this.manifest)        return this.manifest
+    if (this.manifestPromise) return this.manifestPromise
+
+    this.manifestPromise = fetch(MANIFEST_URL)
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<Manifest>
+      })
+      .then(m => { this.manifest = m; return m })
+      .catch(() => null)
+
+    return this.manifestPromise
+  }
+
+  // ── Texture cache ─────────────────────────────────────────────────────────
+
+  private _key(folder: string, filename: string): string {
+    return `${folder}/${filename}`
+  }
+
+  /**
+   * Returns the texture for `filename` inside `folder`.
+   * Uses in-memory cache; starts a new load if not yet cached.
+   * Concurrent calls for the same key share a single in-flight Promise.
+   */
+  private _fetchTexture(folder: string, filename: string): Promise<any> {
+    const key = this._key(folder, filename)
+
+    if (this.texCache.has(key))   return Promise.resolve(this.texCache.get(key))
+    if (this.texPending.has(key)) return this.texPending.get(key)!
+
+    const promise = new Promise<any>(resolve => {
+      if (!this.texLoader) { resolve(null); return }
+
+      this.texLoader.load(
+        `${BASE_PATH}${folder}/${filename}${IMAGE_EXT}`,
+        (tex: any) => {
+          if (!this.texLoader) { tex.dispose(); resolve(null); return }
+          tex.colorSpace = this.THREE.SRGBColorSpace ?? this.THREE.sRGBEncoding
+          this.texCache.set(key, tex)
+          this.texPending.delete(key)
+          resolve(tex)
+        },
+        undefined,
+        () => {
+          this.texCache.set(key, null)
+          this.texPending.delete(key)
+          resolve(null)
+        },
+      )
+    })
+
+    this.texPending.set(key, promise)
+    return promise
+  }
+
+  /**
+   * Disposes and removes every cached texture whose index is outside
+   * the window [centerIdx-1 … centerIdx+1].
+   */
+  private _evictOutside(folder: string, centerIdx: number): void {
+    const keep = new Set(
+      [centerIdx - 1, centerIdx, centerIdx + 1]
+        .filter(i => i >= 0 && i < this.currentImages.length)
+        .map(i => this._key(folder, this.currentImages[i])),
+    )
+    for (const [key, tex] of this.texCache) {
+      if (!keep.has(key) && tex) {
+        tex.dispose()
+        this.texCache.delete(key)
+      }
     }
-    this.overlay = null
-    onClose()
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  private async _navigateTo(newIdx: number): Promise<void> {
+    const { currentFolder: folder, currentImages: imgs } = this
+    if (newIdx < 0 || newIdx >= imgs.length) return
+
+    this._showLoading()
+
+    const tex = await this._fetchTexture(folder, imgs[newIdx])
+    this._applySphereTexture(tex)
+    this.currentIdx = newIdx
+
+    this._hideLoading()
+    this._updateNavButtons()
+    this._updateDots()
+
+    this._drag.lon = 0; this._drag.lat = 0
+
+    if (newIdx + 1 < imgs.length) void this._fetchTexture(folder, imgs[newIdx + 1])
+    if (newIdx - 1 >= 0)          void this._fetchTexture(folder, imgs[newIdx - 1])
+
+    setTimeout(() => this._evictOutside(folder, newIdx), 600)
+  }
+
+  private _applySphereTexture(texture: any): void {
+    if (!this.sphere) return
+    this.sphere.material.map = texture ?? null
+    this.sphere.material.color.set(texture ? 0xffffff : 0x1a2a3a)
+    this.sphere.material.needsUpdate = true
   }
 
   // ── UI ────────────────────────────────────────────────────────────────────
 
   private _buildOverlay(
-    name: string, registry: ExperienceRegistry,
-    gyroOk: boolean, onClose: () => void,
+    hotspotName: string, gyroOk: boolean, onClose: () => void,
   ): void {
-    const count    = registry.getCount()
+    const count    = this.currentImages.length
     const hintText = gyroOk ? 'Move phone to explore' : 'Drag to explore'
+    const fmt      = (n: string) => n.replace(/_/g, ' ')
 
     const div = document.createElement('div')
     div.id = 'v360-overlay'
     div.innerHTML = `
       <canvas id="v360-canvas"></canvas>
       <div id="v360-loading"><div class="v360-spinner"></div></div>
+
+      <!-- Top bar: AR back + close tab -->
       <div id="v360-topbar">
         <button id="v360-back">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -207,69 +433,87 @@ export class Viewer360 {
           </svg>
           AR Map
         </button>
-        <span id="v360-title">${this._fmt(name)}</span>
+        <button id="v360-close-tab" aria-label="Close tab">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6"  x2="6"  y2="18"/>
+            <line x1="6"  y1="6"  x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
+
       ${!gyroOk ? `<div id="v360-gyro-badge">Touch mode</div>` : ''}
+
+      <!-- Side navigation — only shown when count > 1 -->
       ${count > 1 ? `
-        <button class="v360-nav" id="v360-prev" aria-label="Previous">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2"
+        <button class="v360-nav-btn v360-nav-hidden" id="v360-prev-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.6"
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
+          Previous
         </button>
-        <button class="v360-nav" id="v360-next" aria-label="Next">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2"
+        <button class="v360-nav-btn" id="v360-next-btn">
+          Next
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.6"
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 18 15 12 9 6"/>
           </svg>
         </button>
-        <div id="v360-counter">
-          ${Array.from({length: count}, (_, i) =>
-            `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`).join('')}
-        </div>` : ''}
+      ` : ''}
+
       <span id="v360-hint">${hintText}</span>
+
+      <!-- Bottom: hotspot name + progress dots -->
+      <div id="v360-bottom">
+        <span id="v360-title">${fmt(hotspotName)}</span>
+        ${count > 1 ? `
+          <div id="v360-counter">
+            ${Array.from({length: count}, (_, i) =>
+              `<div class="v360-dot${i === 0 ? ' active' : ''}"></div>`,
+            ).join('')}
+          </div>
+        ` : ''}
+      </div>
     `
 
     document.body.appendChild(div)
     this.overlay = div
 
-    div.querySelector('#v360-back')!.addEventListener('click', () => this.close(onClose))
+    // ── Button listeners ───────────────────────────────────────────────────
+    div.querySelector('#v360-back')!.addEventListener('click', () => this._close(onClose))
+
+    div.querySelector('#v360-close-tab')!.addEventListener('click', () => {
+      window.close()
+      setTimeout(() => { window.location.href = CLOSE_URL }, 300)
+    })
 
     if (count > 1) {
-      div.querySelector('#v360-prev')!.addEventListener('click', async () => {
-        const next = registry.navigatePrev()
-        if (next) await this._navTo(next, registry)
+      div.querySelector('#v360-prev-btn')!.addEventListener('click', async () => {
+        await this._navigateTo(this.currentIdx - 1)
       })
-      div.querySelector('#v360-next')!.addEventListener('click', async () => {
-        const next = registry.navigateNext()
-        if (next) await this._navTo(next, registry)
+      div.querySelector('#v360-next-btn')!.addEventListener('click', async () => {
+        await this._navigateTo(this.currentIdx + 1)
       })
     }
 
     requestAnimationFrame(() => div.classList.add('v360-visible'))
   }
 
-  private async _navTo(name: string, registry: ExperienceRegistry): Promise<void> {
-    this._showLoading()
-    this._updateTitle(name)
-    this._updateDots(registry)
-    this._drag.lon = 0; this._drag.lat = 0
-    await this._loadImage(name)
-    this._hideLoading()
+  private _updateNavButtons(): void {
+    const prev = this.overlay?.querySelector('#v360-prev-btn')
+    const next = this.overlay?.querySelector('#v360-next-btn')
+    if (prev) prev.classList.toggle('v360-nav-hidden', this.currentIdx === 0)
+    if (next) next.classList.toggle('v360-nav-hidden', this.currentIdx === this.currentImages.length - 1)
   }
 
-  private _updateTitle(name: string): void {
-    const el = this.overlay?.querySelector('#v360-title')
-    if (el) el.textContent = this._fmt(name)
-  }
-
-  private _updateDots(registry: ExperienceRegistry): void {
+  private _updateDots(): void {
     const dots = this.overlay?.querySelectorAll('.v360-dot')
     if (!dots) return
-    const idx = (registry as any).idx as number
-    dots.forEach((d, i) => d.classList.toggle('active', i === idx))
+    dots.forEach((d, i) => d.classList.toggle('active', i === this.currentIdx))
   }
 
   private _showLoading(): void {
@@ -286,22 +530,40 @@ export class Viewer360 {
     }, 3500)
   }
 
-  private _fmt(name: string): string { return name.replace(/_/g, ' ') }
+  // ── Close ─────────────────────────────────────────────────────────────────
+
+  private _close(onClose: () => void): void {
+    cancelAnimationFrame(this.rafId)
+    this._stopGyro()
+    this._stopTouchDrag()
+    this._stopResizeHandler()
+    const el = this.overlay
+    if (el) {
+      el.classList.remove('v360-visible')
+      setTimeout(() => { el.remove(); this._fullDispose() }, 380)
+    }
+    this.overlay = null
+    onClose()
+  }
 
   // ── Three.js ──────────────────────────────────────────────────────────────
 
   private _initRenderer(): void {
     const { THREE } = this
-    const canvas    = document.getElementById('v360-canvas') as HTMLCanvasElement
+    const canvas = document.getElementById('v360-canvas') as HTMLCanvasElement
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
     this.renderer.setSize(window.innerWidth, window.innerHeight)
 
     this.scene  = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(
-      75, window.innerWidth / window.innerHeight, 0.1, 1000,
-    )
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
+
+    // Single sphere, reused — just swap material.map on navigation
+    const geo = new THREE.SphereGeometry(500, 60, 40)
+    geo.scale(-1, 1, 1)
+    this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x1a2a3a }))
+    this.scene.add(this.sphere)
 
     this.texLoader = new THREE.TextureLoader()
     this._euler    = new THREE.Euler()
@@ -310,15 +572,31 @@ export class Viewer360 {
     this._zee      = new THREE.Vector3(0, 0, 1)
   }
 
-  // ── Resize handler ────────────────────────────────────────────────────────
+  private _fullDispose(): void {
+    // Dispose all cached textures
+    for (const tex of this.texCache.values()) {
+      if (tex) tex.dispose()
+    }
+    this.texCache.clear()
+    this.texPending.clear()
+
+    // Dispose Three.js objects
+    if (this.sphere) {
+      this.sphere.geometry.dispose()
+      this.sphere.material.dispose()
+      this.sphere = null
+    }
+    this.renderer?.dispose()
+    this.renderer = this.scene = this.camera = this.texLoader = null
+  }
+
+  // ── Resize ────────────────────────────────────────────────────────────────
 
   private _startResizeHandler(): void {
     this._resizeHandler = () => {
       if (!this.renderer || !this.camera) return
-      const w = window.innerWidth
-      const h = window.innerHeight
-      this.renderer.setSize(w, h)
-      this.camera.aspect = w / h
+      this.renderer.setSize(window.innerWidth, window.innerHeight)
+      this.camera.aspect = window.innerWidth / window.innerHeight
       this.camera.updateProjectionMatrix()
     }
     window.addEventListener('resize', this._resizeHandler)
@@ -329,54 +607,6 @@ export class Viewer360 {
       window.removeEventListener('resize', this._resizeHandler)
       this._resizeHandler = null
     }
-  }
-
-  private async _loadImage(name: string): Promise<void> {
-    const { THREE } = this
-
-    if (this.sphere) {
-      this.scene.remove(this.sphere)
-      this.sphere.material.dispose()
-      this.sphere.geometry.dispose()
-      this.sphere = null
-    }
-
-    let texture = this.texCache.get(name) ?? null
-    if (!texture) {
-      texture = await new Promise(resolve => {
-        this.texLoader.load(
-          `${IMAGES_PATH}${name}${IMAGE_EXT}`,
-          resolve,
-          undefined,
-          () => resolve(null),
-        )
-      })
-      if (texture) {
-        texture.colorSpace = THREE.SRGBColorSpace ?? THREE.sRGBEncoding
-        this.texCache.set(name, texture)
-      }
-    }
-
-    const geo = new THREE.SphereGeometry(500, 60, 40)
-    geo.scale(-1, 1, 1)
-
-    this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-      map:   texture ?? null,
-      color: texture ? 0xffffff : 0x1a2a3a,
-    }))
-    this.scene.add(this.sphere)
-  }
-
-  private _fullDispose(): void {
-    if (this.sphere) {
-      this.sphere.geometry.dispose()
-      this.sphere.material.dispose()
-      this.sphere = null
-    }
-    this.texCache.forEach(tex => tex.dispose())
-    this.texCache.clear()
-    this.renderer?.dispose()
-    this.renderer = this.scene = this.camera = null
   }
 
   // ── Gyroscope ─────────────────────────────────────────────────────────────
@@ -460,7 +690,6 @@ export class Viewer360 {
         const beta   = THREE.MathUtils.degToRad(this._beta)
         const gamma  = THREE.MathUtils.degToRad(this._gamma)
         const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
-
         this._euler.set(beta, alpha, -gamma, 'YXZ')
         this.camera.quaternion.setFromEuler(this._euler)
         this.camera.quaternion.multiply(this._q1)

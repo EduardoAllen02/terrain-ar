@@ -1,0 +1,95 @@
+{
+  "ANDREIS": {
+    "folder": "Andreis",
+    "images": [
+      "01. Andreis - Malga Fara",
+      "02. Andreis - Faglia Valle Susaibes 1",
+      "03. Andreis - Faglia Valle Susaibes 2",
+      "04. Andreis - Faglia Valle Susaibes 3"
+    ]
+  },
+  "CAMPANILE": {
+    "folder": "Campanile Valmontanaia",
+    "images": [
+      "01. Campanile di Val Montanaia 1",
+      "02. Campanile di Val Montanaia 2",
+      "03. Campanile di Val Montanaia 3"
+    ]
+  },
+  "CHIAMPIUZ": {
+    "folder": "Casera Chiampuz",
+    "images": [
+      "01. Casera Chiampiuz",
+      "02. Forni di Sotto - Forra Torrente Poschiadea"
+    ]
+  },
+  "RONCADA": {
+    "folder": "Casera Roncada",
+    "images": [
+      "01. Casera Roncada 1"
+    ]
+  },
+  "VALINE": {
+    "folder": "Casera Valine",
+    "images": [
+      "01. Casera Valine 1",
+      "02. Casera Valine 2"
+    ]
+  },
+  "CASSO": {
+    "folder": "Casso",
+    "images": [
+      "Casso 1"
+    ]
+  },
+  "CIMOLIANA": {
+    "folder": "Cimoliana",
+    "images": [
+      "01. Val Cimoliana Gola di Gotte",
+      "02. Val Cimoliana Vista"
+    ]
+  },
+  "ERTO": {
+    "folder": "Erto",
+    "images": [
+      "Erto paese"
+    ]
+  },
+  "FRISANCO": {
+    "folder": "Frisanco",
+    "images": [
+      "Frisanco 1",
+      "Frisanco 2"
+    ]
+  },
+  "POFABBRO": {
+    "folder": "",
+    "images": []
+  },
+  "PRAMAGGIORE": {
+    "folder": "Pramaggiore",
+    "images": [
+      "Casera Pramaggiore 1"
+    ]
+  },
+  "SETTIMANA": {
+    "folder": "Val Settimana",
+    "images": [
+      "01. Val Settimana Cascata Ciol de Pess 2",
+      "02. Val Settimana Cascata Ciol de Pess",
+      "03. Val Settimana - Malga Senons"
+    ]
+  },
+  "SUOLA": {
+    "folder": "Passo Suola",
+    "images": [
+      "Forni di Sopra - Passo Suola 1"
+    ]
+  },
+  "ZEMOLA": {
+    "folder": "Val Zemola",
+    "images": [
+      "Erto - Val Zemola"
+    ]
+  }
+}

@@ -3,7 +3,6 @@ import {GestureHandler}                                   from './gesture-handle
 import {ArUiOverlay, requestFullscreenNow,
         maintainFullscreen, installViewportFix}           from './ar-ui-overlay'
 import {BillboardManager}                                 from './billboard-manager'
-import {ExperienceRegistry}                               from './experience-registry'
 import {Viewer360}                                        from './viewer-360'
 import {checkArSupport, checkCameraAccess}                from './device-check'
 
@@ -75,9 +74,8 @@ ecs.registerComponent({
     let placedY      = 0
     let heightOffset = 0
 
-    const ui       = new ArUiOverlay()
-    const registry = new ExperienceRegistry()
-    const viewer   = new Viewer360(THREE)
+    const ui     = new ArUiOverlay()
+    const viewer = new Viewer360(THREE)
 
     const boards = new BillboardManager(THREE, {
       baseSize:       0.35,
@@ -94,8 +92,9 @@ ecs.registerComponent({
         ui.hideHeightBar()
         ui.hideGestureHint()
 
-        // ── On close: soft reset instead of page reload ───────────────
-        viewer.open(name, registry, async () => {
+        // Viewer resolves its own image list via manifest.json.
+        // On close: soft reset instead of page reload.
+        viewer.open(name, async () => {
           viewing360 = false
           await performReset(registerResetBtn)
           restoreArUi()
@@ -116,7 +115,7 @@ ecs.registerComponent({
         {x: HIDDEN_SCALE, y: HIDDEN_SCALE, z: HIDDEN_SCALE})
     }
 
-    // ── Place model at current ground hit ─────────────────────────────
+    // ── Place model at current ground hit ─────────────────────────────────
     const placeAtCurrentHit = (): boolean => {
       const hits       = world.raycastFrom(eid)
       const groundHits = hits.filter((h: any) => h.eid === schema.ground)
@@ -142,13 +141,7 @@ ecs.registerComponent({
       return true
     }
 
-    // ── Restore AR UI controls after closing 360 ──────────────────────
-    //
-    // Re-shows the rotation bar, height bar, reset button and gesture
-    // hint in exactly the same state they had before the viewer opened.
-    // Called both from the 360 close callback and implicitly via
-    // performReset (which re-registers the reset button itself).
-    //
+    // ── Restore AR UI after closing 360 viewer ─────────────────────────────
     const restoreArUi = (): void => {
       ui.showRotationBar((deltaRad: number) => {
         const half = deltaRad * 0.5
@@ -165,7 +158,7 @@ ecs.registerComponent({
       ui.showGestureHint()
     }
 
-    // ── Soft scene reset ──────────────────────────────────────────────
+    // ── Soft scene reset ───────────────────────────────────────────────────
     const performReset = async (reRegisterResetBtn: () => void): Promise<void> => {
       placeAtCurrentHit()
 
@@ -175,16 +168,12 @@ ecs.registerComponent({
 
       boards.dispose(world.three.scene)
       const obj = getTerrainObj()
-      if (obj) {
-        const names = await boards.init(obj, world.three.scene)
-        registry.register(names)
-      }
+      if (obj) await boards.init(obj, world.three.scene)
 
       reRegisterResetBtn()
     }
 
-    // ── Defined at state-machine scope so both placed.onEnter and
-    //    the 360 close callback can reference it ──────────────────────
+    // ── Reset button (scope-level so 360 close callback can reach it) ──────
     const registerResetBtn = () => {
       ui.showResetButton(() => {
         ui.hideResetButton()
@@ -244,10 +233,7 @@ ecs.registerComponent({
 
         boards.dispose(world.three.scene)
         const obj = getTerrainObj()
-        if (obj) {
-          const names = await boards.init(obj, world.three.scene)
-          registry.register(names)
-        }
+        if (obj) await boards.init(obj, world.three.scene)
 
         restoreArUi()
         registerResetBtn()
