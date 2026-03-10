@@ -72,7 +72,8 @@ ecs.registerComponent({
     let viewing360                      = false
 
     // Track whether we've shown the hotspot hint yet (show only once)
-    let hotspotHintShown = false
+    let hotspotHintShown  = false
+    let hotspotHintTimer  = 0   // so we can cancel it if user taps a pin first
 
     let placedY      = 0
     let heightOffset = 0
@@ -86,7 +87,8 @@ ecs.registerComponent({
       debug:          false,
       scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
       onHotspotTap: (name) => {
-        // Dismiss hotspot hint immediately on first tap
+        // Cancel pending hint + dismiss if already visible
+        clearTimeout(hotspotHintTimer)
         ui.hideHotspotHint()
 
         if (viewing360) return
@@ -244,12 +246,12 @@ ecs.registerComponent({
 
         dataAttribute.cursor(eid).placed = true
 
-        // Show the "Tap a pin" hint the very first time the model is placed.
-        // Subsequent resets (via the Reset button) do NOT re-show it.
+        // Show "tap a pin" hint only on first placement, and only AFTER
+        // gesture hints have fully faded (they auto-dismiss at 5000ms + 450ms fade).
+        // Cancel the timer if the user taps a pin before it fires.
         if (!hotspotHintShown) {
           hotspotHintShown = true
-          // Small delay so the scene settle animation finishes first
-          setTimeout(() => ui.showHotspotHint(), 800)
+          hotspotHintTimer = window.setTimeout(() => ui.showHotspotHint(), 6200)
         }
       })
       .onTick(() => {
@@ -260,6 +262,7 @@ ecs.registerComponent({
       .onExit(() => {
         gestures?.detach(); gestures = null
         boards.dispose(world.three.scene)
+        clearTimeout(hotspotHintTimer)
         ui.hideResetButton()
         ui.hideRotationBar()
         ui.hideHeightBar()
