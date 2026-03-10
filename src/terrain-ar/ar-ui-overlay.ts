@@ -297,12 +297,13 @@ const injectStyles = (() => {
 
       /* ══════════════════════════════════════════════════════════════════
          HOTSPOT HINT — pulsing popup suggesting to tap a pin
+         Positioned just above the bottom control bar
       ══════════════════════════════════════════════════════════════════ */
       #ar-hotspot-hint {
         position: fixed;
-        top: 50%;
+        bottom: calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) * 2 + 18px);
         left: 50%;
-        transform: translate(-50%, -50%);
+        transform: translateX(-50%);
         z-index: 9998;
         display: flex;
         align-items: center;
@@ -320,8 +321,8 @@ const injectStyles = (() => {
       #ar-hotspot-hint.ar-hotspot-hint-visible { opacity: 1; }
       #ar-hotspot-hint.ar-hotspot-hint-hidden  { opacity: 0; }
       @keyframes ar-hotspot-hint-float {
-        0%, 100% { transform: translate(-50%, -50%) translateY(0px); }
-        50%       { transform: translate(-50%, -50%) translateY(-5px); }
+        0%, 100% { transform: translateX(-50%) translateY(0px); }
+        50%       { transform: translateX(-50%) translateY(-5px); }
       }
       .ar-hotspot-hint-icon {
         width: 28px; height: 28px; flex-shrink: 0;
