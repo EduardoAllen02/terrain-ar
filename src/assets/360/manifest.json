@@ -6,6 +6,12 @@
       "02. Andreis - Faglia Valle Susaibes 1",
       "03. Andreis - Faglia Valle Susaibes 2",
       "04. Andreis - Faglia Valle Susaibes 3"
+    ],
+    "labels": [
+      "Belvedere di Andreis",
+      "Faglia di Val Susaibes 1",
+      "Faglia di Val Susaibes 2",
+      "Faglia di Val Susaibes 3"
     ]
   },
   "CAMPANILE": {
@@ -14,6 +20,11 @@
       "01. Campanile di Val Montanaia 1",
       "02. Campanile di Val Montanaia 2",
       "03. Campanile di Val Montanaia 3"
+    ],
+    "labels": [
+      "Campanile Val Montanaia 1",
+      "Campanile Val Montanaia 2",
+      "Campanile Val Montanaia 3"
     ]
   },
   "CHIAMPIUZ": {
@@ -21,12 +32,21 @@
     "images": [
       "01. Casera Chiampiuz",
       "02. Forni di Sotto - Forra Torrente Poschiadea"
+    ],
+    "labels": [
+      "Casera Chiampiuz",
+      "Forra Rio Purone"
     ]
   },
   "RONCADA": {
     "folder": "Casera Roncada",
     "images": [
-      "01. Casera Roncada 1"
+      "01. Casera Roncada 1",
+      "Forcella Savalons"
+    ],
+    "labels": [
+      "Casera Roncada",
+      "Forcella Savalons"
     ]
   },
   "VALINE": {
@@ -34,12 +54,19 @@
     "images": [
       "01. Casera Valine 1",
       "02. Casera Valine 2"
+    ],
+    "labels": [
+      "Casera Valine",
+      "Casera Valine"
     ]
   },
   "CASSO": {
     "folder": "Casso",
     "images": [
       "Casso 1"
+    ],
+    "labels": [
+      "Casso"
     ]
   },
   "CIMOLIANA": {
@@ -47,12 +74,19 @@
     "images": [
       "01. Val Cimoliana Gola di Gotte",
       "02. Val Cimoliana Vista"
+    ],
+    "labels": [
+      "Gola di Gotte",
+      "Panoramica Val Cimoliana"
     ]
   },
   "ERTO": {
     "folder": "Erto",
     "images": [
       "Erto paese"
+    ],
+    "labels": [
+      "Erto"
     ]
   },
   "FRISANCO": {
@@ -60,16 +94,24 @@
     "images": [
       "Frisanco 1",
       "Frisanco 2"
+    ],
+    "labels": [
+      "Vicolo",
+      "Piazza"
     ]
   },
   "POFABBRO": {
     "folder": "",
-    "images": []
+    "images": [],
+    "labels": []
   },
   "PRAMAGGIORE": {
     "folder": "Pramaggiore",
     "images": [
       "Casera Pramaggiore 1"
+    ],
+    "labels": [
+      "Casera Pramaggiore"
     ]
   },
   "SETTIMANA": {
@@ -77,19 +119,34 @@
     "images": [
       "01. Val Settimana Cascata Ciol de Pess 2",
       "02. Val Settimana Cascata Ciol de Pess",
-      "03. Val Settimana - Malga Senons"
+      "03. Val Settimana - Malga Senons",
+      "Sorgente della Russa"
+    ],
+    "labels": [
+      "Cascata Ciol de Pess",
+      "Cascata Ciol de Pess",
+      "Casera Senons",
+      "Sorgente della Russa"
     ]
   },
   "SUOLA": {
     "folder": "Passo Suola",
     "images": [
-      "Forni di Sopra - Passo Suola 1"
+      "Forni di Sopra - Passo Suola 1",
+      "Passo Suola 2"
+    ],
+    "labels": [
+      "Passo Suola 1",
+      "Passo Suola 2"
     ]
   },
   "ZEMOLA": {
     "folder": "Val Zemola",
     "images": [
       "Erto - Val Zemola"
+    ],
+    "labels": [
+      "Val Zemola"
     ]
   }
 }

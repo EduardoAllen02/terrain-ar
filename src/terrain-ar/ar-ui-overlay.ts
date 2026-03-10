@@ -1,27 +1,21 @@
 /**
- * ArUiOverlay — v10
+ * ArUiOverlay — v11
  *
- * Changes vs v9:
- *  • Fullscreen is NO LONGER automatic — the user must tap the custom
- *    PNG button to enter it.
- *  • `showFullscreenButton()` / `hideFullscreenButton()` added.
- *    Shows the client-supplied PNG (FULLSCREEN_BTN_IMG).
- *    After the user taps it, `maintainFullscreen()` activates so the
- *    session stays fullscreen through the 360 viewer and back.
- *  • While IN fullscreen the X close button is shown (unchanged).
- *  • `requestFullscreenNow` / `maintainFullscreen` are still exported
- *    but the auto-enter-on-first-touch is removed from terrain-tap-place.
+ * Changes vs v10:
+ *  • Close button is ALWAYS visible in AR from the start (no longer
+ *    hidden until fullscreen is entered). It sits at top-right.
+ *  • Fullscreen button is repositioned to the LEFT of the close button.
+ *    On tap: enters fullscreen + activates maintainFullscreen + hides itself.
+ *    No exit-fullscreen button exists anywhere.
+ *  • `_revealCloseButton()` removed — close button is shown immediately.
+ *  • `showHotspotHint()` / `hideHotspotHint()` added — pulsing overlay
+ *    that appears when the terrain is first placed, suggesting the user
+ *    to tap a hotspot pin to open a 360 view.
  */
 
 // ── Client config ─────────────────────────────────────────────────────────────
 
-/** URL of the custom fullscreen-entry button image supplied by the client. */
 const FULLSCREEN_BTN_IMG = 'assets/ui/fullscreen-btn.png'
-
-/**
- * URL to navigate to when the X button is tapped and window.close() fails.
- * Replace with the URL the client provides.
- */
 const CLOSE_REDIRECT_URL = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
 
 // ── Viewport orientation fix ──────────────────────────────────────────────────
@@ -140,17 +134,16 @@ const injectStyles = (() => {
 
       /* ── Custom PNG fullscreen button ───────────────────────────────── */
       /*
-       * Shown ONLY when NOT in fullscreen.
-       * Uses the client-supplied PNG — no background, no border-radius,
-       * just the image itself at a comfortable tap size.
+       * Positioned to the LEFT of the close button.
+       * Visible from the start, hides itself after the user taps it.
        */
       #ar-fs-btn {
         position: fixed;
-        top:  18px;
-        right: 18px;
+        top:  14px;
+        right: 70px;     /* left of the 38px close button + 14px gap + 18px edge */
         z-index: 9998;
-        width:  52px;
-        height: 52px;
+        width:  46px;
+        height: 46px;
         padding: 0;
         border: none;
         background: transparent;
@@ -164,13 +157,15 @@ const injectStyles = (() => {
       #ar-fs-btn img {
         width: 100%; height: 100%;
         object-fit: contain; display: block;
-        /* Drop-shadow so the PNG reads against any background */
         filter: drop-shadow(0 2px 6px rgba(0,0,0,0.30));
       }
       #ar-fs-btn:active img { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.20)); opacity:.8; }
 
       /* ── X Close button ─────────────────────────────────────────────── */
-      /* Shown ONLY while IN fullscreen */
+      /*
+       * Shown in AR to close the entire tab.
+       * Visible from the start — no longer tied to fullscreen state.
+       */
       #ar-close-btn {
         position:fixed; top:18px; right:18px; z-index:9998;
         width:38px; height:38px;
@@ -300,6 +295,50 @@ const injectStyles = (() => {
       .ar-hint-icon-drag  { animation:ar-drag  1.6s ease-in-out infinite; }
       @keyframes ar-drag  { 0%,100%{transform:translateX(0);opacity:.5} 50%{transform:translateX(6px);opacity:1} }
 
+      /* ══════════════════════════════════════════════════════════════════
+         HOTSPOT HINT — pulsing popup suggesting to tap a pin
+      ══════════════════════════════════════════════════════════════════ */
+      #ar-hotspot-hint {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 9998;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: rgba(0, 0, 0, 0.62);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(74,184,216,0.35);
+        border-radius: 50px;
+        padding: 14px 22px;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity .4s ease;
+        animation: ar-hotspot-hint-float 2.8s ease-in-out infinite;
+      }
+      #ar-hotspot-hint.ar-hotspot-hint-visible { opacity: 1; }
+      #ar-hotspot-hint.ar-hotspot-hint-hidden  { opacity: 0; }
+      @keyframes ar-hotspot-hint-float {
+        0%, 100% { transform: translate(-50%, -50%) translateY(0px); }
+        50%       { transform: translate(-50%, -50%) translateY(-5px); }
+      }
+      .ar-hotspot-hint-icon {
+        width: 28px; height: 28px; flex-shrink: 0;
+        animation: ar-hotspot-hint-pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes ar-hotspot-hint-pulse {
+        0%,100% { transform: scale(1);   opacity: .7; }
+        50%      { transform: scale(1.18); opacity: 1; }
+      }
+      .ar-hotspot-hint-text {
+        font-family: var(--ar-font);
+        font-size: 13px; font-weight: 500;
+        letter-spacing: .06em;
+        color: rgba(255,255,255,.92);
+        white-space: nowrap;
+      }
+
       /* ── Landscape ──────────────────────────────────────────────────── */
       @media (orientation: landscape) {
         :root {
@@ -308,13 +347,16 @@ const injectStyles = (() => {
         }
         #ar-bottom-bar     { max-width:600px; }
         #ar-close-btn      { top:10px; right:14px; width:32px; height:32px; }
-        #ar-fs-btn         { top:10px; right:14px; width:42px; height:42px; }
+        #ar-fs-btn         { top:8px;  right:56px; width:36px; height:36px; }
         .ar-hint-row       { padding:6px 12px; }
         .ar-hint-text      { font-size:10px; }
         .ar-hint-icon      { width:18px; height:18px; }
         #ar-reset-btn      { font-size:9px; gap:4px; }
         #ar-reset-btn svg  { width:11px; height:11px; }
         .ar-track-label    { font-size:8px; }
+        #ar-hotspot-hint   { padding:10px 18px; gap:10px; }
+        .ar-hotspot-hint-text { font-size:11px; }
+        .ar-hotspot-hint-icon { width:22px; height:22px; }
       }
       @media (orientation: landscape) and (min-width: 768px) {
         :root { --ar-h:38px; --ar-thumb:24px; --ar-edge:28px; }
@@ -420,8 +462,9 @@ function attachTrack(
 
 export class ArUiOverlay {
   private loader:       HTMLElement | null = null
-  private fsBtn:        HTMLElement | null = null   // ← PNG fullscreen button
-  private closeBtn:     HTMLElement | null = null   // ← X button (in-fullscreen)
+  private fsBtn:        HTMLElement | null = null
+  private closeBtn:     HTMLElement | null = null
+  private hotspotHint:  HTMLElement | null = null
   private gestureHint:  HTMLElement | null = null
   private bottomBar:    HTMLElement | null = null
   private rowTop:       HTMLElement | null = null
@@ -520,14 +563,9 @@ export class ArUiOverlay {
 
   // ── PNG Fullscreen button ─────────────────────────────────────────────────
   /**
-   * Shows the client-supplied PNG in the top-right corner.
-   * When tapped:
-   *   1. Enters fullscreen immediately (requires this to be called from
-   *      within a user-gesture handler on iOS — the touchstart that reaches
-   *      this button qualifies).
-   *   2. Activates maintainFullscreen() so the session never exits fullscreen
-   *      involuntarily (e.g. when 360 viewer opens/closes).
-   *   3. Hides itself and reveals the X close button instead.
+   * Shows the client-supplied PNG at top-right (to the left of the close button).
+   * On tap: enters fullscreen + activates maintainFullscreen + hides itself.
+   * There is intentionally NO exit-fullscreen button.
    */
   showFullscreenButton(): void {
     injectStyles()
@@ -541,10 +579,10 @@ export class ArUiOverlay {
     requestAnimationFrame(() => btn.classList.add('ar-fs-visible'))
 
     btn.addEventListener('click', () => {
-      requestFullscreenNow()   // enter fullscreen on this gesture
-      maintainFullscreen()     // from now on, stay fullscreen always
+      requestFullscreenNow()
+      maintainFullscreen()
       this.hideFullscreenButton()
-      this._revealCloseButton()
+      // Close button is already visible — nothing more to do
     })
   }
 
@@ -557,9 +595,8 @@ export class ArUiOverlay {
 
   // ── X Close button ────────────────────────────────────────────────────────
   /**
-   * Adds the X element to the DOM but keeps it invisible.
-   * Call once at app start — `showFullscreenButton()` will reveal it
-   * after the user enters fullscreen.
+   * Shows the X close button immediately (always visible in AR).
+   * Closes the entire tab / redirects when tapped.
    */
   showCloseButton(): void {
     injectStyles()
@@ -575,8 +612,9 @@ export class ArUiOverlay {
     </svg>`
     document.body.appendChild(btn)
     this.closeBtn = btn
-    // NOTE: intentionally NOT adding ar-close-visible yet —
-    //       _revealCloseButton() does that after fullscreen is entered.
+
+    // Reveal immediately — close button is always visible in AR
+    requestAnimationFrame(() => btn.classList.add('ar-close-visible'))
 
     btn.addEventListener('click', () => {
       window.close()
@@ -584,17 +622,47 @@ export class ArUiOverlay {
     })
   }
 
-  /** Called internally once the user has entered fullscreen. */
-  private _revealCloseButton(): void {
-    if (!this.closeBtn) return
-    requestAnimationFrame(() => this.closeBtn?.classList.add('ar-close-visible'))
-  }
-
   hideCloseButton(): void {
     if (!this.closeBtn) return
     const el = this.closeBtn; this.closeBtn = null
     el.classList.remove('ar-close-visible')
     setTimeout(() => el.remove(), 280)
+  }
+
+  // ── Hotspot hint ──────────────────────────────────────────────────────────
+  /**
+   * Shows a floating, pulsing hint suggesting the user tap a pin.
+   * Auto-dismisses after 6 seconds or when `hideHotspotHint()` is called.
+   */
+  showHotspotHint(): void {
+    injectStyles()
+    if (this.hotspotHint) return
+
+    const div = document.createElement('div')
+    div.id = 'ar-hotspot-hint'
+    div.innerHTML = `
+      <svg class="ar-hotspot-hint-icon" viewBox="0 0 32 32" fill="none"
+           stroke="rgba(74,184,216,1)" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="16" cy="13" r="5"/>
+        <path d="M16 2C10.48 2 6 6.48 6 12c0 7.5 10 18 10 18s10-10.5 10-18c0-5.52-4.48-10-10-10z"/>
+        <circle cx="16" cy="12" r="2.5" fill="rgba(74,184,216,0.5)" stroke="none"/>
+      </svg>
+      <span class="ar-hotspot-hint-text">Tap a pin to explore 360°</span>`
+    document.body.appendChild(div)
+    this.hotspotHint = div
+    requestAnimationFrame(() => div.classList.add('ar-hotspot-hint-visible'))
+
+    this._hintTimer = window.setTimeout(() => this.hideHotspotHint(), 6000)
+  }
+
+  hideHotspotHint(): void {
+    window.clearTimeout(this._hintTimer)
+    if (!this.hotspotHint) return
+    const el = this.hotspotHint; this.hotspotHint = null
+    el.classList.remove('ar-hotspot-hint-visible')
+    el.classList.add('ar-hotspot-hint-hidden')
+    setTimeout(() => el.remove(), 450)
   }
 
   // ── Reset button ──────────────────────────────────────────────────────────

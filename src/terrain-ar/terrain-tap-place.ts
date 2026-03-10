@@ -71,6 +71,9 @@ ecs.registerComponent({
     let absoluteScaleDisabled           = false
     let viewing360                      = false
 
+    // Track whether we've shown the hotspot hint yet (show only once)
+    let hotspotHintShown = false
+
     let placedY      = 0
     let heightOffset = 0
 
@@ -83,6 +86,9 @@ ecs.registerComponent({
       debug:          false,
       scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
       onHotspotTap: (name) => {
+        // Dismiss hotspot hint immediately on first tap
+        ui.hideHotspotHint()
+
         if (viewing360) return
         viewing360 = true
 
@@ -92,8 +98,6 @@ ecs.registerComponent({
         ui.hideHeightBar()
         ui.hideGestureHint()
 
-        // Viewer resolves its own image list via manifest.json.
-        // On close: soft reset instead of page reload.
         viewer.open(name, async () => {
           viewing360 = false
           await performReset(registerResetBtn)
@@ -173,7 +177,7 @@ ecs.registerComponent({
       reRegisterResetBtn()
     }
 
-    // ── Reset button (scope-level so 360 close callback can reach it) ──────
+    // ── Reset button ───────────────────────────────────────────────────────
     const registerResetBtn = () => {
       ui.showResetButton(() => {
         ui.hideResetButton()
@@ -239,6 +243,14 @@ ecs.registerComponent({
         registerResetBtn()
 
         dataAttribute.cursor(eid).placed = true
+
+        // Show the "Tap a pin" hint the very first time the model is placed.
+        // Subsequent resets (via the Reset button) do NOT re-show it.
+        if (!hotspotHintShown) {
+          hotspotHintShown = true
+          // Small delay so the scene settle animation finishes first
+          setTimeout(() => ui.showHotspotHint(), 800)
+        }
       })
       .onTick(() => {
         if (viewing360) return
@@ -252,6 +264,7 @@ ecs.registerComponent({
         ui.hideRotationBar()
         ui.hideHeightBar()
         ui.hideGestureHint()
+        ui.hideHotspotHint()
         // closeButton intentionally kept visible through all states
       })
   },

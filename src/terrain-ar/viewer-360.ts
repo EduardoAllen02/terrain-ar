@@ -1,37 +1,21 @@
 /**
- * Viewer360 — v2
+ * Viewer360 — v3
  *
- * Multi-image per hotspot with a sliding-window texture cache.
+ * Changes vs v2:
+ *  • Top bar replaced: "AR Map ←" and "close tab ✕" buttons are GONE.
+ *    A single "✕" button (top-left) now just closes the 360 and returns to AR.
+ *    No close-tab functionality lives in the 360 viewer.
+ *  • Touch drag is ALWAYS active, even when gyroscope is available.
+ *    Gyro + touch work simultaneously: gyro provides base orientation,
+ *    touch accumulates an additive lon/lat offset on top of it.
+ *  • Image labels are read from manifest.json `labels[]` array and shown
+ *    in the bottom title instead of the raw hotspot name.
+ *  • Title text allows up to 2 lines (word-wrap) and smaller font so long
+ *    names fit without truncation.
+ *  • Touch offset resets to zero on each image navigation (as before).
  *
- * ── Directory layout ─────────────────────────────────────────────────────────
- *
- *   assets/360/manifest.json
- *   assets/360/<folder name on disk>/<image stem>.jpg
- *
- * ── manifest.json format ─────────────────────────────────────────────────────
- *
- *   {
- *     "BLENDER_HOTSPOT_NAME": {
- *       "folder": "Exact folder name on disk",
- *       "images": ["stem1", "stem2", ...]
- *     },
- *     ...
- *   }
- *
- *   Keys    = hotspot names as in Blender (after hotspot_ prefix), e.g. "ANDREIS"
- *   folder  = exact folder name inside assets/360/ on the server
- *   images  = filename stems (no path, no .jpg extension)
- *
- * ── Cache policy ─────────────────────────────────────────────────────────────
- *
- *   • Nothing is downloaded until the user taps a hotspot.
- *   • On open   : load images[0], then silently prefetch images[1].
- *   • On navigate: load images[newIdx] (may already be cached),
- *                  prefetch images[newIdx ± 1] in background,
- *                  dispose textures outside window [newIdx-1 … newIdx+1]
- *                  after a short delay (600 ms) so the GPU has finished.
- *   • The manifest is kept in memory for the Viewer360 instance lifetime.
- *   • All textures are disposed when the viewer closes.
+ * NOTE: If touch pan direction feels inverted in gyro mode, flip the sign
+ *       of `this._drag.lon` / `this._drag.lat` in the gyro render block.
  */
 
 import {probeGyroscope} from './device-check'
@@ -41,9 +25,13 @@ import {probeGyroscope} from './device-check'
 const BASE_PATH    = 'assets/360/'
 const IMAGE_EXT    = '.jpg'
 const MANIFEST_URL = `${BASE_PATH}manifest.json`
-const CLOSE_URL    = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
 
-interface HotspotEntry { folder: string; images: string[] }
+interface HotspotEntry {
+  folder: string
+  images: string[]
+  /** Display names matching each image by index. Falls back to image stem. */
+  labels?: string[]
+}
 type Manifest = Record<string, HotspotEntry>
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -67,35 +55,23 @@ const injectStyles = (() => {
         width: 100%; height: 100%; display: block;
       }
 
-      /* ── Top bar: Back ← and → Close tab ── */
+      /* ── Top bar: single X to close 360 ── */
       #v360-topbar {
         position: absolute; top: 0; left: 0; right: 0;
-        display: flex; align-items: center; justify-content: space-between;
+        display: flex; align-items: center; justify-content: flex-start;
         padding: 18px 16px 0;
         z-index: 2; pointer-events: none;
       }
-      #v360-back {
-        display: flex; align-items: center; gap: 6px;
-        background: rgba(255,255,255,0.92); border: none; border-radius: 22px;
-        padding: 8px 16px 8px 10px;
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 13px; font-weight: 500; color: #4ab8d8;
-        letter-spacing: 0.04em; cursor: pointer; pointer-events: all;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-        -webkit-tap-highlight-color: transparent;
-        transition: background 0.15s;
-      }
-      #v360-back:active { background: rgba(235,248,255,0.98); }
-      #v360-close-tab {
+      #v360-close-360 {
         display: flex; align-items: center; justify-content: center;
         background: rgba(255,255,255,0.92); border: none; border-radius: 50%;
-        width: 38px; height: 38px; flex-shrink: 0;
+        width: 42px; height: 42px; flex-shrink: 0;
         color: #4ab8d8; cursor: pointer; pointer-events: all;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
         -webkit-tap-highlight-color: transparent;
         transition: background 0.15s;
       }
-      #v360-close-tab:active { background: rgba(235,248,255,0.98); }
+      #v360-close-360:active { background: rgba(235,248,255,0.98); }
 
       /* ── Side navigation buttons ── */
       .v360-nav-btn {
@@ -116,12 +92,11 @@ const injectStyles = (() => {
         background: rgba(235,248,255,0.98);
         transform: translateY(-50%) scale(0.94);
       }
-      /* Hidden state — invisible but layout-safe */
       .v360-nav-btn.v360-nav-hidden { opacity: 0; pointer-events: none; }
       #v360-prev-btn { left: 14px; }
       #v360-next-btn { right: 14px; }
 
-      /* ── Bottom: hotspot name + dots ── */
+      /* ── Bottom: place name + dots ── */
       #v360-bottom {
         position: absolute; bottom: 28px; left: 0; right: 0;
         display: flex; flex-direction: column; align-items: center; gap: 10px;
@@ -131,11 +106,19 @@ const injectStyles = (() => {
         background: rgba(255,255,255,0.92); border-radius: 18px;
         padding: 7px 22px;
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        font-size: 13px; font-weight: 600;
-        letter-spacing: 0.14em; text-transform: uppercase; color: #4ab8d8;
+        font-size: 12px; font-weight: 600;
+        letter-spacing: 0.10em; text-transform: uppercase; color: #4ab8d8;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-        max-width: 70vw; white-space: nowrap;
-        overflow: hidden; text-overflow: ellipsis;
+        max-width: 74vw;
+        /* Allow up to 2 lines instead of truncating */
+        white-space: normal;
+        word-break: break-word;
+        text-align: center;
+        line-height: 1.4em;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
       }
       #v360-counter { display: flex; gap: 7px; }
       .v360-dot {
@@ -184,11 +167,10 @@ const injectStyles = (() => {
       /* ── Landscape ── */
       @media (orientation: landscape) {
         #v360-topbar    { padding: 10px 14px 0; }
-        #v360-back      { padding: 6px 12px 6px 8px; font-size: 12px; }
-        #v360-close-tab { width: 32px; height: 32px; }
+        #v360-close-360 { width: 34px; height: 34px; }
         .v360-nav-btn   { padding: 8px 12px; font-size: 11px; }
         #v360-bottom    { bottom: 14px; gap: 7px; }
-        #v360-title     { font-size: 12px; padding: 5px 16px; }
+        #v360-title     { font-size: 11px; padding: 5px 16px; }
         #v360-hint      { bottom: 80px; font-size: 9px; }
       }
     `
@@ -215,17 +197,15 @@ export class Viewer360 {
   private renderer:  any = null
   private scene:     any = null
   private camera:    any = null
-  private sphere:    any = null     // reused across texture swaps
+  private sphere:    any = null
   private texLoader: any = null
   private rafId      = 0
 
-  // ── Manifest (persists for the life of this instance) ─────────────────────
+  // ── Manifest ──────────────────────────────────────────────────────────────
   private manifest:        Manifest | null = null
   private manifestPromise: Promise<Manifest | null> | null = null
 
   // ── Texture sliding-window cache ──────────────────────────────────────────
-  // Key: `${hotspot}/${filename}`   (filename = stem, no path, no extension)
-  // Value: loaded THREE.Texture, or null for a 404/error
   private texCache   = new Map<string, any>()
   private texPending = new Map<string, Promise<any>>()
 
@@ -245,7 +225,9 @@ export class Viewer360 {
   private _qOrient: any = null
   private _zee:     any = null
 
-  // ── Touch drag (fallback when no gyro) ───────────────────────────────────
+  // ── Touch drag ───────────────────────────────────────────────────────────
+  // Used in BOTH gyro mode (as additive offset) and touch-only mode (absolute).
+  // Reset to 0 on each image navigation.
   private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
@@ -255,15 +237,9 @@ export class Viewer360 {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
-  /**
-   * Opens the 360 viewer for `hotspotName`.
-   * Resolves the image list from the manifest, loads the first image,
-   * then prefetches adjacent images in the background.
-   */
   async open(hotspotName: string, onClose: () => void): Promise<void> {
     injectStyles()
 
-    // Resolve manifest and image list
     const manifest = await this._loadManifest()
     this.currentHotspot = hotspotName
     const entry = manifest?.[hotspotName]
@@ -271,7 +247,6 @@ export class Viewer360 {
     this.currentImages  = entry?.images  ?? []
     this.currentIdx     = 0
 
-    // Hotspot has no images yet — abort silently
     if (this.currentImages.length === 0) {
       onClose()
       return
@@ -283,18 +258,21 @@ export class Viewer360 {
     this._initRenderer()
     this._startResizeHandler()
     if (gyroOk) this._startGyro()
-    else         this._startTouchDrag()
+
+    // Always enable touch drag — works as additive offset in gyro mode
+    // and as standalone direction in touch-only mode.
+    this._startTouchDrag()
+
     this._startLoop()
 
-    // Load image[0] — show viewer as soon as it's ready
     const tex = await this._fetchTexture(this.currentFolder, this.currentImages[0])
     this._applySphereTexture(tex)
     this._hideLoading()
     this._updateNavButtons()
     this._updateDots()
+    this._updateTitle()
     this._hideHintAfterDelay()
 
-    // Silently prefetch image[1] in the background
     if (this.currentImages.length > 1) {
       void this._fetchTexture(this.currentFolder, this.currentImages[1])
     }
@@ -317,17 +295,30 @@ export class Viewer360 {
     return this.manifestPromise
   }
 
+  // ── Label helpers ─────────────────────────────────────────────────────────
+
+  /** Returns the display label for the current image index. */
+  private _getCurrentLabel(): string {
+    const entry  = this.manifest?.[this.currentHotspot]
+    const labels = entry?.labels
+    if (labels && labels[this.currentIdx]) return labels[this.currentIdx]
+    // Fallback: image stem without leading "NN. " prefix
+    const stem = this.currentImages[this.currentIdx] ?? this.currentHotspot
+    return stem.replace(/^\d+\.\s*/, '')
+  }
+
+  /** Updates the bottom title element with the current label. */
+  private _updateTitle(): void {
+    const el = this.overlay?.querySelector<HTMLElement>('#v360-title')
+    if (el) el.textContent = this._getCurrentLabel()
+  }
+
   // ── Texture cache ─────────────────────────────────────────────────────────
 
   private _key(folder: string, filename: string): string {
     return `${folder}/${filename}`
   }
 
-  /**
-   * Returns the texture for `filename` inside `folder`.
-   * Uses in-memory cache; starts a new load if not yet cached.
-   * Concurrent calls for the same key share a single in-flight Promise.
-   */
   private _fetchTexture(folder: string, filename: string): Promise<any> {
     const key = this._key(folder, filename)
 
@@ -359,10 +350,6 @@ export class Viewer360 {
     return promise
   }
 
-  /**
-   * Disposes and removes every cached texture whose index is outside
-   * the window [centerIdx-1 … centerIdx+1].
-   */
   private _evictOutside(folder: string, centerIdx: number): void {
     const keep = new Set(
       [centerIdx - 1, centerIdx, centerIdx + 1]
@@ -389,11 +376,14 @@ export class Viewer360 {
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
+    // Reset touch offset so each new image starts from centre
+    this._drag.lon = 0
+    this._drag.lat = 0
+
     this._hideLoading()
     this._updateNavButtons()
     this._updateDots()
-
-    this._drag.lon = 0; this._drag.lat = 0
+    this._updateTitle()
 
     if (newIdx + 1 < imgs.length) void this._fetchTexture(folder, imgs[newIdx + 1])
     if (newIdx - 1 >= 0)          void this._fetchTexture(folder, imgs[newIdx - 1])
@@ -414,8 +404,7 @@ export class Viewer360 {
     hotspotName: string, gyroOk: boolean, onClose: () => void,
   ): void {
     const count    = this.currentImages.length
-    const hintText = gyroOk ? 'Move phone to explore' : 'Drag to explore'
-    const fmt      = (n: string) => n.replace(/_/g, ' ')
+    const hintText = gyroOk ? 'Move phone · drag to explore' : 'Drag to explore'
 
     const div = document.createElement('div')
     div.id = 'v360-overlay'
@@ -423,17 +412,9 @@ export class Viewer360 {
       <canvas id="v360-canvas"></canvas>
       <div id="v360-loading"><div class="v360-spinner"></div></div>
 
-      <!-- Top bar: AR back + close tab -->
+      <!-- Top bar: single X to close 360 and return to AR -->
       <div id="v360-topbar">
-        <button id="v360-back">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="15 18 9 12 15 6"/>
-          </svg>
-          AR Map
-        </button>
-        <button id="v360-close-tab" aria-label="Close tab">
+        <button id="v360-close-360" aria-label="Close 360">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2.6"
                stroke-linecap="round" stroke-linejoin="round">
@@ -445,7 +426,6 @@ export class Viewer360 {
 
       ${!gyroOk ? `<div id="v360-gyro-badge">Touch mode</div>` : ''}
 
-      <!-- Side navigation — only shown when count > 1 -->
       ${count > 1 ? `
         <button class="v360-nav-btn v360-nav-hidden" id="v360-prev-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
@@ -453,7 +433,7 @@ export class Viewer360 {
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Previous
+          Prev
         </button>
         <button class="v360-nav-btn" id="v360-next-btn">
           Next
@@ -467,9 +447,9 @@ export class Viewer360 {
 
       <span id="v360-hint">${hintText}</span>
 
-      <!-- Bottom: hotspot name + progress dots -->
+      <!-- Bottom: place name (from labels) + progress dots -->
       <div id="v360-bottom">
-        <span id="v360-title">${fmt(hotspotName)}</span>
+        <span id="v360-title"></span>
         ${count > 1 ? `
           <div id="v360-counter">
             ${Array.from({length: count}, (_, i) =>
@@ -483,13 +463,7 @@ export class Viewer360 {
     document.body.appendChild(div)
     this.overlay = div
 
-    // ── Button listeners ───────────────────────────────────────────────────
-    div.querySelector('#v360-back')!.addEventListener('click', () => this._close(onClose))
-
-    div.querySelector('#v360-close-tab')!.addEventListener('click', () => {
-      window.close()
-      setTimeout(() => { window.location.href = CLOSE_URL }, 300)
-    })
+    div.querySelector('#v360-close-360')!.addEventListener('click', () => this._close(onClose))
 
     if (count > 1) {
       div.querySelector('#v360-prev-btn')!.addEventListener('click', async () => {
@@ -559,7 +533,6 @@ export class Viewer360 {
     this.scene  = new THREE.Scene()
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
 
-    // Single sphere, reused — just swap material.map on navigation
     const geo = new THREE.SphereGeometry(500, 60, 40)
     geo.scale(-1, 1, 1)
     this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x1a2a3a }))
@@ -573,14 +546,12 @@ export class Viewer360 {
   }
 
   private _fullDispose(): void {
-    // Dispose all cached textures
     for (const tex of this.texCache.values()) {
       if (tex) tex.dispose()
     }
     this.texCache.clear()
     this.texPending.clear()
 
-    // Dispose Three.js objects
     if (this.sphere) {
       this.sphere.geometry.dispose()
       this.sphere.material.dispose()
@@ -642,11 +613,19 @@ export class Viewer360 {
   }
 
   // ── Touch drag ────────────────────────────────────────────────────────────
+  // Always enabled. In gyro mode the lon/lat values become additive offsets
+  // layered on top of the gyro orientation. In touch-only mode they define
+  // the absolute look direction.
 
   private _startTouchDrag(): void {
     const d = this._drag
+    d.lon = 0; d.lat = 0  // always reset on open
+
     this._onTouchStart = (e: TouchEvent) => {
+      // Allow single-finger drag; ignore if nav buttons are the target
       if (e.touches.length !== 1) return
+      const target = e.target as HTMLElement
+      if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
       d.active = true
       d.lastX  = e.touches[0].clientX
       d.lastY  = e.touches[0].clientY
@@ -686,8 +665,13 @@ export class Viewer360 {
       this.rafId = requestAnimationFrame(tick)
 
       if (this._gyroOk) {
-        const alpha  = THREE.MathUtils.degToRad(this._alpha)
-        const beta   = THREE.MathUtils.degToRad(this._beta)
+        // Gyro-based orientation with additive touch offset.
+        // _drag.lon / _drag.lat accumulate via touch and add to the gyro angles.
+        // Tip: if pan direction feels inverted, negate the _drag.lon / _drag.lat terms.
+        const alpha  = THREE.MathUtils.degToRad(this._alpha + this._drag.lon)
+        const beta   = THREE.MathUtils.degToRad(
+          Math.max(-85, Math.min(85, this._beta - this._drag.lat * 0.5)),
+        )
         const gamma  = THREE.MathUtils.degToRad(this._gamma)
         const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
         this._euler.set(beta, alpha, -gamma, 'YXZ')
@@ -696,6 +680,7 @@ export class Viewer360 {
         this._qOrient.setFromAxisAngle(this._zee, -orient)
         this.camera.quaternion.multiply(this._qOrient)
       } else {
+        // Touch-only: _drag.lon / _drag.lat are absolute look angles
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(

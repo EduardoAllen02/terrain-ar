@@ -1,9 +1,14 @@
 /**
  * DeviceCheck
  *
- * Detecta compatibilidad con AR, giroscopio y cámara ANTES de arrancar.
- * Muestra alertas con estilo consistente al resto de la UI.
- * Si AR no está disponible redirige a la versión 3D web.
+ * Detects AR/gyro/camera compatibility BEFORE starting.
+ * All user-facing alerts are bilingual: English + Italian.
+ *
+ * Camera denied bug note:
+ *   The AR experience is opened via a link/button from an external site
+ *   (new tab or redirect). Some browsers ask for camera permission again
+ *   because the permission from a previous session may not persist.
+ *   The alert below guides the user to re-grant it from browser settings.
  */
 
 const FALLBACK_3D_URL = 'https://virtualtours.interiors3d.com/3d-model/fvg-unesco_test/fullscreen/'
@@ -33,7 +38,7 @@ const CSS = `
     display: flex; align-items: center; justify-content: center;
     font-size: 26px;
   }
-  #dc-icon.warn { background: rgba(255,180,0,0.15); }
+  #dc-icon.warn  { background: rgba(255,180,0,0.15); }
   #dc-icon.error { background: rgba(255,70,70,0.12); }
 
   #dc-title {
@@ -44,7 +49,18 @@ const CSS = `
   #dc-msg {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
     font-size: 13px; font-weight: 400;
-    color: #5a6a7a; text-align: center; line-height: 1.55;
+    color: #5a6a7a; text-align: center; line-height: 1.6;
+    white-space: pre-line;
+  }
+  #dc-divider {
+    width: 100%; border: none; border-top: 1px solid rgba(0,0,0,0.08);
+    margin: 0;
+  }
+  #dc-msg-it {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 12px; font-weight: 400;
+    color: #8a9aaa; text-align: center; line-height: 1.55;
+    white-space: pre-line;
   }
   #dc-btn-primary {
     width: 100%; padding: 13px;
@@ -66,7 +82,7 @@ const CSS = `
   }
 `
 
-function injectCSS() {
+function injectCSS(): void {
   if (document.getElementById('dc-styles')) return
   const s = document.createElement('style')
   s.id = 'dc-styles'
@@ -75,13 +91,14 @@ function injectCSS() {
 }
 
 function showAlert(opts: {
-  icon:       string
-  iconType:   'warn' | 'error'
-  title:      string
-  message:    string
-  primary:    string
-  secondary?: string
-  onPrimary:  () => void
+  icon:        string
+  iconType:    'warn' | 'error'
+  titleEn:     string
+  messageEn:   string
+  messageIt:   string
+  primaryEn:   string
+  secondaryEn?: string
+  onPrimary:   () => void
   onSecondary?: () => void
 }): void {
   injectCSS()
@@ -91,11 +108,13 @@ function showAlert(opts: {
   div.id = 'dc-overlay'
   div.innerHTML = `
     <div id="dc-card">
-      <div id="dc-icon ${opts.iconType}">${opts.icon}</div>
-      <div id="dc-title">${opts.title}</div>
-      <div id="dc-msg">${opts.message}</div>
-      <button id="dc-btn-primary">${opts.primary}</button>
-      ${opts.secondary ? `<button id="dc-btn-secondary">${opts.secondary}</button>` : ''}
+      <div id="dc-icon" class="${opts.iconType}">${opts.icon}</div>
+      <div id="dc-title">${opts.titleEn}</div>
+      <div id="dc-msg">${opts.messageEn}</div>
+      <hr id="dc-divider">
+      <div id="dc-msg-it">${opts.messageIt}</div>
+      <button id="dc-btn-primary">${opts.primaryEn}</button>
+      ${opts.secondaryEn ? `<button id="dc-btn-secondary">${opts.secondaryEn}</button>` : ''}
     </div>
   `
   document.body.appendChild(div)
@@ -106,7 +125,7 @@ function showAlert(opts: {
     setTimeout(() => div.remove(), 320)
     opts.onPrimary()
   })
-  if (opts.secondary && opts.onSecondary) {
+  if (opts.secondaryEn && opts.onSecondary) {
     div.querySelector('#dc-btn-secondary')!.addEventListener('click', () => {
       div.classList.remove('dc-show')
       setTimeout(() => div.remove(), 320)
@@ -125,39 +144,44 @@ export function dismissAlert(): void {
 // ── Public checks ─────────────────────────────────────────────────────────────
 
 /**
- * Verifica soporte de WebXR / 8thwall AR.
- * En dispositivos sin soporte ofrece redirigir a la web 3D.
- * Returns true si el usuario decide continuar de todos modos.
+ * Checks WebXR / 8th Wall AR support.
+ * On unsupported devices, offers to redirect to the 3D web version.
  */
 export function checkArSupport(): void {
-  const ua      = navigator.userAgent
-  const isIOS   = /iP(hone|ad|od)/.test(ua)
+  const ua        = navigator.userAgent
+  const isIOS     = /iP(hone|ad|od)/.test(ua)
   const isAndroid = /Android/.test(ua)
 
-  // iPad OS 16+ con Safari tiene limitaciones en WebXR de terceros (8thwall usa su propio pipeline)
-  // 8thwall NO soporta: Firefox móvil, Opera Mini, KaiOS, navegadores in-app sin permisos de cámara
   const isSupported = (isIOS || isAndroid) && (
     /Safari/.test(ua) || /Chrome/.test(ua) || /CriOS/.test(ua)
   )
 
   if (!isSupported) {
     showAlert({
-      icon:      '🌐',
-      iconType:  'warn',
-      title:     'Dispositivo no compatible con AR',
-      message:   'Este dispositivo o navegador no admite experiencias AR. Puedes explorar el mapa en la versión 3D interactiva.',
-      primary:   'Ver versión 3D',
-      secondary: 'Continuar de todas formas',
-      onPrimary: () => { window.location.href = FALLBACK_3D_URL },
+      icon:       '🌐',
+      iconType:   'warn',
+      titleEn:    'Device not AR compatible',
+      messageEn:  'This device or browser does not support AR experiences. You can explore the map in the interactive 3D version.',
+      messageIt:  'Questo dispositivo o browser non supporta le esperienze AR. Puoi esplorare la mappa nella versione 3D interattiva.',
+      primaryEn:  'Open 3D version',
+      secondaryEn:'Continue anyway',
+      onPrimary:  () => { window.location.href = FALLBACK_3D_URL },
       onSecondary: () => { /* user insists */ },
     })
   }
 }
 
 /**
- * Verifica si otro tab/app está usando la cámara.
- * Llama onReady cuando la cámara está disponible.
- * Llama onError con mensaje descriptivo si no.
+ * Checks camera access.
+ * Handles two failure scenarios:
+ *   'denied'  — user blocked or hasn't granted permission yet
+ *   'inuse'   — camera is occupied by another app
+ *   'unknown' — other error
+ *
+ * Note: When the AR experience is opened via a link from an external site,
+ * the browser may prompt for camera permission again. If the user previously
+ * dismissed the prompt instead of accepting, this 'denied' path will fire.
+ * The message guides them to re-enable it from browser settings.
  */
 export async function checkCameraAccess(
   onReady: () => void,
@@ -165,28 +189,31 @@ export async function checkCameraAccess(
 ): Promise<void> {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: true })
-    stream.getTracks().forEach(t => t.stop())  // release immediately
+    stream.getTracks().forEach(t => t.stop())
     onReady()
   } catch (err: any) {
     const name = (err as DOMException).name
+
     if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
       onError('denied')
       showAlert({
-        icon:     '📷',
-        iconType: 'error',
-        title:    'Acceso a cámara denegado',
-        message:  'Esta experiencia AR necesita la cámara. Ve a Configuración → Privacidad → Cámara y habilita el acceso para este navegador.',
-        primary:  'Entendido',
+        icon:      '📷',
+        iconType:  'error',
+        titleEn:   'Camera access denied',
+        messageEn: 'This AR experience needs your camera.\n\nGo to Settings → Privacy → Camera and enable access for this browser.',
+        messageIt: 'Questa esperienza AR ha bisogno della fotocamera.\n\nVai su Impostazioni → Privacy → Fotocamera e abilita l\'accesso per questo browser.',
+        primaryEn: 'Got it',
         onPrimary: () => {},
       })
     } else if (name === 'NotReadableError' || name === 'TrackStartError') {
       onError('inuse')
       showAlert({
-        icon:     '📷',
-        iconType: 'warn',
-        title:    'Cámara en uso',
-        message:  'Otra aplicación está usando la cámara. Ciérrala y vuelve a intentarlo.',
-        primary:  'Reintentar',
+        icon:      '📷',
+        iconType:  'warn',
+        titleEn:   'Camera in use',
+        messageEn: 'Another app is using the camera.\nClose it and try again.',
+        messageIt: 'Un\'altra app sta usando la fotocamera.\nChiudila e riprova.',
+        primaryEn: 'Retry',
         onPrimary: () => window.location.reload(),
       })
     } else {
@@ -196,15 +223,14 @@ export async function checkCameraAccess(
 }
 
 /**
- * Verifica si el giroscopio está disponible y tiene datos reales.
- * Resuelve con true (gyro OK) o false (sin giroscopio).
+ * Checks if a real gyroscope is available.
+ * Returns true if gyro data is detected within timeoutMs.
  */
 export function probeGyroscope(timeoutMs = 1500): Promise<boolean> {
   return new Promise(resolve => {
     let resolved = false
     const handler = (e: DeviceOrientationEvent) => {
       if (resolved) return
-      // e.alpha null significa que no hay datos reales
       if (e.alpha !== null) {
         resolved = true
         window.removeEventListener('deviceorientation', handler)
