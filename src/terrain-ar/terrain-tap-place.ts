@@ -156,7 +156,7 @@ ecs.registerComponent({
       })
 
       ui.showHeightBar((delta: number) => {
-        heightOffset = Math.max(0, heightOffset + delta)
+        heightOffset = Math.max(-2, heightOffset + delta)
         const pos = world.transform.getWorldPosition(schema.terrainEntity)
         world.setPosition(schema.terrainEntity, pos.x, placedY + heightOffset, pos.z)
       })
