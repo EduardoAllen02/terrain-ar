@@ -258,6 +258,8 @@ export class Viewer360 {
   private _levelingTo:   any = null
   private _levelingStart = 0
   private readonly _levelingDuration = 380 // ms — ease-out cubic
+  /** Periodic auto-level timer (runs every 2s when gyro is active, not touching). */
+  private _autoLevelInterval = 0
 
   constructor(private readonly THREE: any) {}
 
@@ -542,6 +544,7 @@ export class Viewer360 {
   private _close(onClose: () => void): void {
     cancelAnimationFrame(this.rafId)
     this._cancelLeveling()
+    this._stopAutoLevel()
     this._stopGyro()
     this._stopTouchDrag()
     this._stopResizeHandler()
@@ -638,6 +641,7 @@ export class Viewer360 {
       this._gamma = e.gamma ?? 0
     }
     window.addEventListener('deviceorientation', this._gyroHandler)
+    this._startAutoLevel()
   }
 
   private _stopGyro(): void {
@@ -646,6 +650,7 @@ export class Viewer360 {
       this._gyroHandler = null
     }
     this._gyroOk = false
+    this._stopAutoLevel()
   }
 
   // ── Touch drag ────────────────────────────────────────────────────────────
@@ -680,6 +685,21 @@ export class Viewer360 {
     this._levelingFrom = this._levelingTo = null
   }
 
+  /** Starts a 2-second periodic auto-level — fires only when not touching. */
+  private _startAutoLevel(): void {
+    this._stopAutoLevel()
+    this._autoLevelInterval = window.setInterval(() => {
+      if (!this._isTouching && !this._isLeveling && this._gyroOk) {
+        this._startLevelingAnimation(this.camera.quaternion.clone())
+      }
+    }, 2000)
+  }
+
+  private _stopAutoLevel(): void {
+    clearInterval(this._autoLevelInterval)
+    this._autoLevelInterval = 0
+  }
+
   /**
    * If `fromQuat` has any roll, animates it out with ease-out cubic (~380ms),
    * then bakes the leveled quat into _gyroCorrection.
@@ -689,21 +709,8 @@ export class Viewer360 {
     this._cancelLeveling()
     const toQuat = this._deRoll(fromQuat)
 
-    // Bake gyro correction immediately from the target (leveled) position.
-    // This is done up front so that if the user retouches during animation
-    // the correction is already correct.
-    const bakeCorrection = (leveledQ: any) => {
-      const gyroQ = this._computeGyroQuat()
-      this._gyroCorrection = gyroQ.clone().invert().multiply(leveledQ.clone())
-    }
-
-    if (Math.abs(fromQuat.dot(toQuat)) > 0.9998) {
-      bakeCorrection(fromQuat)
-      return
-    }
-
-    bakeCorrection(toQuat)
-
+    // Always animate — even tiny roll looks wrong when gyro resumes.
+    // The slerp is imperceptibly short when roll is already near zero.
     this._levelingFrom  = fromQuat.clone()
     this._levelingTo    = toQuat
     this._levelingStart = performance.now()
@@ -723,6 +730,10 @@ export class Viewer360 {
         this._levelingRaf = requestAnimationFrame(step)
       } else {
         this._isLeveling = false
+        // Bake correction AFTER animation completes so gyro resumes from
+        // the exact leveled position in the correct coordinate space.
+        const gyroQ = this._computeGyroQuat()
+        this._gyroCorrection = gyroQ.clone().invert().multiply(this._levelingTo.clone())
       }
     }
     this._levelingRaf = requestAnimationFrame(step)
