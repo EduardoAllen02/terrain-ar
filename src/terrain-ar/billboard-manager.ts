@@ -3,18 +3,6 @@ export interface BillboardOptions {
   verticalOffset?: number
   debug?:          boolean
   onHotspotTap?:   (name: string) => void
-  /**
-   * Per-hotspot scale multipliers.
-   * Any hotspot whose name appears here will use  baseSize * multiplier
-   * instead of the global baseSize.
-   *
-   * Example:
-   *   scaleOverrides: {
-   *     'PRAMAGGIORE':        1.8,   // 80 % larger than default
-   *     'PASSO_SUOLA':        1.4,
-   *     'FORNI_DI_SOTTO':     0.7,   // 30 % smaller than default
-   *   }
-   */
   scaleOverrides?: Record<string, number>
 }
 
@@ -58,7 +46,7 @@ export class BillboardManager {
   ) {
     this.opts = {
       baseSize:       opts.baseSize       ?? 0.10,
-      verticalOffset: opts.verticalOffset ?? 0,      // kept for API compat, no longer used
+      verticalOffset: opts.verticalOffset ?? 0,
       debug:          opts.debug          ?? false,
       onHotspotTap:   opts.onHotspotTap   ?? (() => {}),
       scaleOverrides: opts.scaleOverrides  ?? {},
@@ -118,13 +106,8 @@ export class BillboardManager {
 
     for (const { sprite, anchor, name } of this.billboards) {
       anchor.getWorldPosition(_v3)
-      // No verticalOffset: the anchor empty in Blender sits exactly on the
-      // terrain surface, and sprite.center = (0.5, 0) pins the bottom edge
-      // of the PNG to that world position, so the pin tip is always locked
-      // to the correct 3-D point regardless of camera angle.
       sprite.position.copy(_v3)
 
-      // ── Per-sprite size: use override multiplier if defined, else 1.0 ──
       const multiplier = opts.scaleOverrides[name] ?? 1.0
       const size  = opts.baseSize * multiplier * ts
       const ratio = this._getAspect(sprite)
@@ -176,24 +159,56 @@ export class BillboardManager {
     const cam = this._getCamera()
     if (!cam) return
 
-    const tap = new this.THREE.Vector2(
-       (clientX / window.innerWidth)  * 2 - 1,
-      -(clientY / window.innerHeight) * 2 + 1,
-    )
-    const threshold = (44 / window.innerWidth) * 2
+    const tapX = (clientX / window.innerWidth)  * 2 - 1
+    const tapY = -(clientY / window.innerHeight) * 2 + 1
+
+    // Minimum touch target: 44px converted to NDC width units
+    const minNDC = (44 / window.innerWidth) * 2
+
     let closest: Billboard | null = null
     let closestDist = Infinity
 
     for (const b of hotspots) {
-      const ndc  = b.sprite.position.clone().project(cam)
-      const dist = tap.distanceTo(new this.THREE.Vector2(ndc.x, ndc.y))
-      if (dist < threshold && dist < closestDist) { closest = b; closestDist = dist }
+      // sprite.center = (0.5, 0) → sprite.position is the PIN TIP (bottom centre).
+      // The full PNG extends upward from the tip by sprite.scale.y world units.
+      // We need the VISUAL CENTRE of the sprite in NDC for accurate hit testing.
+
+      const tipNDC = b.sprite.position.clone().project(cam)
+
+      // Sprites always face the camera, so "sprite up" = camera up in world space.
+      const camUp = new this.THREE.Vector3(0, 1, 0)
+        .transformDirection(cam.matrixWorld)
+        .normalize()
+
+      // World position of the visual top of the sprite
+      const topWorld = b.sprite.position.clone()
+        .addScaledVector(camUp, b.sprite.scale.y)
+      const topNDC = topWorld.clone().project(cam)
+
+      // Visual centre in NDC = midpoint between tip and top
+      const cx = (tipNDC.x + topNDC.x) * 0.5
+      const cy = (tipNDC.y + topNDC.y) * 0.5
+
+      // Hit radius = half the sprite's NDC height (covers the full image).
+      // Also include half the NDC width so wide PNGs are fully tappable.
+      // Take the max with the 44px minimum touch target.
+      const ndcH     = Math.abs(topNDC.y - tipNDC.y)
+      const ndcW     = ndcH * (b.sprite.scale.x / b.sprite.scale.y)
+      const hitR     = Math.max(Math.max(ndcH, ndcW) * 0.6, minNDC)
+
+      const dist = Math.hypot(tapX - cx, tapY - cy)
+      if (dist < hitR && dist < closestDist) {
+        closest = b
+        closestDist = dist
+      }
     }
+
     if (closest) this.opts.onHotspotTap(closest.name)
   }
 
   private _getCamera(): any {
     let cam: any = null
+    // Sprites are direct children of the scene — traverse from scene root.
     this.billboards[0]?.sprite.parent?.traverse?.((c: any) => {
       if (c.isCamera && !cam) cam = c
     })
@@ -215,9 +230,6 @@ export class BillboardManager {
       depthTest: false, depthWrite: false, sizeAttenuation: true,
     })
     const sprite = new THREE.Sprite(mat)
-    // Pivot at the bottom-centre of the PNG (the tip of the dotted pin).
-    // The anchor empty in Blender must be placed exactly on the terrain
-    // surface — no Z offset needed in Blender anymore.
     sprite.center.set(0.5, 0)
     sprite.renderOrder = 999
     return sprite
@@ -238,7 +250,6 @@ export class BillboardManager {
     ctx.font = 'bold 20px sans-serif'
     ctx.textAlign = 'center'
     ctx.fillText(label, 128, 40)
-    // _makeSprite already sets center(0.5, 0) so debug sprites behave the same way
     return this._makeSprite(new this.THREE.CanvasTexture(canvas))
   }
 
