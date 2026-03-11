@@ -239,14 +239,21 @@ export class Viewer360 {
    */
   private _touchBaseQuat: any = null
   private _isTouching = false
-  /** Last raw touch coordinates used for incremental delta calculation. */
   private _lastTouchX = 0
   private _lastTouchY = 0
-  /** lon/lat for touch-ONLY mode (no gyro). Not used when gyro is active. */
   private _drag = { lon: 0, lat: 0 }
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
   private _onTouchEnd:   (() => void)              | null = null
+
+  // ── Horizon leveling animation ────────────────────────────────────────────
+  /** True while the post-touch leveling slerp is running. */
+  private _isLeveling    = false
+  private _levelingRaf   = 0
+  private _levelingFrom: any = null
+  private _levelingTo:   any = null
+  private _levelingStart = 0
+  private readonly _levelingDuration = 380 // ms — ease-out cubic
 
   constructor(private readonly THREE: any) {}
 
@@ -397,6 +404,7 @@ export class Viewer360 {
     this._drag.lon = 0
     this._drag.lat = 0
     if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1) // identity
+    this._cancelLeveling()
 
     this._hideLoading()
     this._updateNavButtons()
@@ -529,6 +537,7 @@ export class Viewer360 {
 
   private _close(onClose: () => void): void {
     cancelAnimationFrame(this.rafId)
+    this._cancelLeveling()
     this._stopGyro()
     this._stopTouchDrag()
     this._stopResizeHandler()
@@ -640,10 +649,79 @@ export class Viewer360 {
   //   touchstart → capture camera.quaternion as _touchBaseQuat; gyro ignored.
   //   touchmove  → apply incremental yaw/pitch to _touchBaseQuat; camera
   //                follows the finger from exactly point A — no jump.
-  //   touchend   → correction = gyroQuat⁻¹ × finalCameraQuat
-  //                gyro resumes: camera = gyroQuat × correction = point B ✓
+  //   touchend   → animate roll back to zero (horizon leveling, ~380ms),
+  //                then bake correction = gyroQuat⁻¹ × leveledCameraQuat.
+  //                Gyro resumes at point B, perfectly upright.
   //
   // TOUCH-ONLY MODE — classic lon/lat spherical, vertical ±89°.
+  // No roll possible in this mode (lookAt always uses world-up).
+
+  /**
+   * Returns a copy of `q` with roll removed — same yaw and pitch,
+   * but the camera's up vector aligned to world up.
+   * If looking straight up/down (|fwd.y| > 0.999), returns `q` unchanged
+   * to avoid gimbal-lock artifacts.
+   */
+  private _deRoll(q: any): any {
+    const { THREE } = this
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q)
+    if (Math.abs(fwd.y) > 0.999) return q.clone()
+    const m = new THREE.Matrix4().lookAt(
+      new THREE.Vector3(0, 0, 0), fwd, new THREE.Vector3(0, 1, 0),
+    )
+    return new THREE.Quaternion().setFromRotationMatrix(m)
+  }
+
+  private _cancelLeveling(): void {
+    cancelAnimationFrame(this._levelingRaf)
+    this._isLeveling = false
+    this._levelingFrom = this._levelingTo = null
+  }
+
+  /**
+   * Animates the camera from `fromQuat` to the de-rolled version of `fromQuat`
+   * using an ease-out cubic over `_levelingDuration` ms.
+   * When done, rebakes `_gyroCorrection` from the leveled position so gyro
+   * resumes exactly at the leveled viewpoint.
+   */
+  private _startLevelingAnimation(fromQuat: any): void {
+    this._cancelLeveling()
+    const toQuat = this._deRoll(fromQuat)
+
+    // Skip animation if already level (quaternion dot product ≈ 1)
+    if (Math.abs(fromQuat.dot(toQuat)) > 0.9998) {
+      // Still bake correction so gyro is accurate
+      const gyroQ = this._computeGyroQuat()
+      this._gyroCorrection = gyroQ.clone().invert().multiply(fromQuat.clone())
+      return
+    }
+
+    this._levelingFrom  = fromQuat.clone()
+    this._levelingTo    = toQuat
+    this._levelingStart = performance.now()
+    this._isLeveling    = true
+
+    const step = () => {
+      if (!this.renderer || !this._isLeveling) return
+      const elapsed = performance.now() - this._levelingStart
+      const raw     = Math.min(elapsed / this._levelingDuration, 1)
+      const eased   = 1 - Math.pow(1 - raw, 3) // ease-out cubic
+
+      this.camera.quaternion.slerpQuaternions(
+        this._levelingFrom, this._levelingTo, eased,
+      )
+
+      if (raw < 1) {
+        this._levelingRaf = requestAnimationFrame(step)
+      } else {
+        // Animation complete — bake leveled position into gyro correction
+        this._isLeveling = false
+        const gyroQ = this._computeGyroQuat()
+        this._gyroCorrection = gyroQ.clone().invert().multiply(this._levelingTo.clone())
+      }
+    }
+    this._levelingRaf = requestAnimationFrame(step)
+  }
 
   /** Returns the raw gyro quaternion for the current device orientation. */
   private _computeGyroQuat(): any {
@@ -670,12 +748,14 @@ export class Viewer360 {
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
 
+      // Cancel any in-progress leveling — user is taking control again
+      this._cancelLeveling()
+
       this._isTouching = true
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
 
       if (this._gyroOk) {
-        // Snapshot the exact frame the user sees right now.
         this._touchBaseQuat = this.camera.quaternion.clone()
       }
     }
@@ -690,17 +770,20 @@ export class Viewer360 {
 
       if (this._gyroOk && this._touchBaseQuat) {
         const { THREE } = this
-        const SENS = 0.003 // radians per pixel
+        const SENS = 0.003
 
-        // Yaw: rotate around world Y
         const yawQ = new THREE.Quaternion().setFromAxisAngle(
           new THREE.Vector3(0, 1, 0), dx * SENS,
         )
-        // Pitch: rotate around the camera's own right vector
-        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
-        const pitchQ = new THREE.Quaternion().setFromAxisAngle(right, dy * SENS)
+        // Use the LEVEL right vector (camera right projected onto the XZ plane)
+        // instead of the raw camera right — this prevents roll accumulation
+        // when the device is already tilted.
+        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
+        camRight.y = 0
+        if (camRight.lengthSq() < 0.001) camRight.set(1, 0, 0)
+        camRight.normalize()
+        const pitchQ = new THREE.Quaternion().setFromAxisAngle(camRight, dy * SENS)
 
-        // Accumulate into base, then push to camera
         this._touchBaseQuat.premultiply(yawQ).premultiply(pitchQ)
         this.camera.quaternion.copy(this._touchBaseQuat)
       } else if (!this._gyroOk) {
@@ -715,11 +798,8 @@ export class Viewer360 {
       this._isTouching = false
 
       if (this._gyroOk) {
-        // Bake the drag result into _gyroCorrection so gyro resumes from point B.
-        const gyroQ = this._computeGyroQuat()
-        this._gyroCorrection = gyroQ.clone().invert().multiply(
-          this.camera.quaternion.clone(),
-        )
+        // Animate roll back to zero, then bake the leveled correction.
+        this._startLevelingAnimation(this.camera.quaternion.clone())
       }
     }
 
@@ -741,6 +821,7 @@ export class Viewer360 {
     }
     this._onTouchStart = this._onTouchMove = this._onTouchEnd = null
     this._isTouching = false
+    this._cancelLeveling()
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
@@ -752,9 +833,10 @@ export class Viewer360 {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
-      if (this._gyroOk && !this._isTouching) {
+      if (this._isLeveling) {
+        // Leveling animation is running its own RAF — just render what it set.
+      } else if (this._gyroOk && !this._isTouching) {
         // Gyro drives camera; correction preserves the user's last drag position.
-        // camera = gyroQuat × _gyroCorrection
         this.camera.quaternion.copy(this._computeGyroQuat()).multiply(this._gyroCorrection)
       } else if (!this._gyroOk) {
         // Touch-only: lookAt from lon/lat
