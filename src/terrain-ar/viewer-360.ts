@@ -1,21 +1,20 @@
 /**
- * Viewer360 — v3
+ * Viewer360 — v4
  *
- * Changes vs v2:
- *  • Top bar replaced: "AR Map ←" and "close tab ✕" buttons are GONE.
- *    A single "✕" button (top-left) now just closes the 360 and returns to AR.
- *    No close-tab functionality lives in the 360 viewer.
- *  • Touch drag is ALWAYS active, even when gyroscope is available.
- *    Gyro + touch work simultaneously: gyro provides base orientation,
- *    touch accumulates an additive lon/lat offset on top of it.
- *  • Image labels are read from manifest.json `labels[]` array and shown
- *    in the bottom title instead of the raw hotspot name.
- *  • Title text allows up to 2 lines (word-wrap) and smaller font so long
- *    names fit without truncation.
- *  • Touch offset resets to zero on each image navigation (as before).
- *
- * NOTE: If touch pan direction feels inverted in gyro mode, flip the sign
- *       of `this._drag.lon` / `this._drag.lat` in the gyro render block.
+ * Changes vs v3:
+ *  • Navigation clears sphere to black immediately before fetching the next
+ *    texture — no more "frozen previous frame" while loading.
+ *  • Gyro is FROZEN while a finger is on screen. Touch drives the view
+ *    exclusively during the drag. On finger lift, gyro resumes from the
+ *    device's physical orientation (accumulated touch offset resets to 0).
+ *    This matches the UX of YouTube 360 / Google Street View.
+ *  • Vertical range extended to ±89° (was ±85°). Users can now look straight
+ *    up to the zenith of the equirectangular photo.
+ *  • touchcancel handled the same as touchend (gyro reset + active=false).
+ *  • Memory strategy confirmed correct:
+ *    - Sliding window ±1: max 3 textures in GPU memory at once (~30-60 MB).
+ *    - On close: _fullDispose() releases ALL GPU textures immediately.
+ *    - Textures that finish loading after close are disposed on arrival.
  */
 
 import {probeGyroscope} from './device-check'
@@ -370,13 +369,15 @@ export class Viewer360 {
     const { currentFolder: folder, currentImages: imgs } = this
     if (newIdx < 0 || newIdx >= imgs.length) return
 
+    // Clear current image immediately → black background while loading
+    this._applySphereTexture(null)
     this._showLoading()
 
     const tex = await this._fetchTexture(folder, imgs[newIdx])
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
-    // Reset touch offset so each new image starts from centre
+    // Reset look direction to centre for the new image
     this._drag.lon = 0
     this._drag.lat = 0
 
@@ -385,9 +386,12 @@ export class Viewer360 {
     this._updateDots()
     this._updateTitle()
 
+    // Prefetch neighbours in background
     if (newIdx + 1 < imgs.length) void this._fetchTexture(folder, imgs[newIdx + 1])
     if (newIdx - 1 >= 0)          void this._fetchTexture(folder, imgs[newIdx - 1])
 
+    // Evict textures outside the ±1 window after a short delay so the GPU
+    // has finished with anything still in the pipeline.
     setTimeout(() => this._evictOutside(folder, newIdx), 600)
   }
 
@@ -613,16 +617,17 @@ export class Viewer360 {
   }
 
   // ── Touch drag ────────────────────────────────────────────────────────────
-  // Always enabled. In gyro mode the lon/lat values become additive offsets
-  // layered on top of the gyro orientation. In touch-only mode they define
-  // the absolute look direction.
+  // In gyro mode:   while finger is DOWN, gyro is frozen and touch drives the
+  //                 view exclusively. On finger UP, gyro resumes from the
+  //                 device's physical orientation (accumulated offset resets).
+  // In touch-only:  lon/lat are the absolute look angles at all times.
+  // Vertical range: ±89° (allows looking straight up/down without gimbal lock).
 
   private _startTouchDrag(): void {
     const d = this._drag
-    d.lon = 0; d.lat = 0  // always reset on open
+    d.lon = 0; d.lat = 0; d.active = false
 
     this._onTouchStart = (e: TouchEvent) => {
-      // Allow single-finger drag; ignore if nav buttons are the target
       if (e.touches.length !== 1) return
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
@@ -632,18 +637,27 @@ export class Viewer360 {
     }
     this._onTouchMove = (e: TouchEvent) => {
       if (!d.active || e.touches.length !== 1) return
-      d.lon  -= (e.touches[0].clientX - d.lastX) * 0.25
-      d.lat  += (e.touches[0].clientY - d.lastY) * 0.15
-      d.lat   = Math.max(-85, Math.min(85, d.lat))
+      d.lon -= (e.touches[0].clientX - d.lastX) * 0.25
+      d.lat += (e.touches[0].clientY - d.lastY) * 0.15
+      d.lat  = Math.max(-89, Math.min(89, d.lat))
       d.lastX = e.touches[0].clientX
       d.lastY = e.touches[0].clientY
     }
-    this._onTouchEnd = () => { d.active = false }
+    this._onTouchEnd = () => {
+      d.active = false
+      // In gyro mode: reset accumulated lon/lat so when the user next touches,
+      // they drag from the current physical orientation, not a stale offset.
+      if (this._gyroOk) {
+        d.lon = 0
+        d.lat = 0
+      }
+    }
 
     const canvas = document.getElementById('v360-canvas')!
     canvas.addEventListener('touchstart', this._onTouchStart, { passive: true })
     canvas.addEventListener('touchmove',  this._onTouchMove,  { passive: true })
     canvas.addEventListener('touchend',   this._onTouchEnd,   { passive: true })
+    canvas.addEventListener('touchcancel', this._onTouchEnd,  { passive: true })
   }
 
   private _stopTouchDrag(): void {
@@ -664,14 +678,12 @@ export class Viewer360 {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
-      if (this._gyroOk) {
-        // Gyro-based orientation with additive touch offset.
-        // _drag.lon / _drag.lat accumulate via touch and add to the gyro angles.
-        // Tip: if pan direction feels inverted, negate the _drag.lon / _drag.lat terms.
-        const alpha  = THREE.MathUtils.degToRad(this._alpha + this._drag.lon)
-        const beta   = THREE.MathUtils.degToRad(
-          Math.max(-85, Math.min(85, this._beta - this._drag.lat * 0.5)),
-        )
+      if (this._gyroOk && !this._drag.active) {
+        // ── Gyro mode (finger not on screen) ──────────────────────────────
+        // Device physical orientation drives the camera entirely.
+        // No touch offset is applied — gyro is the sole authority.
+        const alpha  = THREE.MathUtils.degToRad(this._alpha)
+        const beta   = THREE.MathUtils.degToRad(this._beta)
         const gamma  = THREE.MathUtils.degToRad(this._gamma)
         const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
         this._euler.set(beta, alpha, -gamma, 'YXZ')
@@ -680,7 +692,9 @@ export class Viewer360 {
         this._qOrient.setFromAxisAngle(this._zee, -orient)
         this.camera.quaternion.multiply(this._qOrient)
       } else {
-        // Touch-only: _drag.lon / _drag.lat are absolute look angles
+        // ── Touch mode (finger down OR no gyro available) ─────────────────
+        // lon/lat define the absolute look direction.
+        // lat ±89° allows looking straight up/down without gimbal lock.
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(

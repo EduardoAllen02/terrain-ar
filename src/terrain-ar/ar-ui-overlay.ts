@@ -296,47 +296,47 @@ const injectStyles = (() => {
       @keyframes ar-drag  { 0%,100%{transform:translateX(0);opacity:.5} 50%{transform:translateX(6px);opacity:1} }
 
       /* ══════════════════════════════════════════════════════════════════
-         HOTSPOT HINT — pulsing popup suggesting to tap a pin
-         Positioned just above the bottom control bar
+         HOTSPOT HINT — shown sequentially AFTER gesture hints fade.
+         Sits just above the bottom bar; gesture hints are gone by then.
       ══════════════════════════════════════════════════════════════════ */
       #ar-hotspot-hint {
         position: fixed;
-        bottom: calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) * 2 + 18px);
+        bottom: calc(var(--ar-bottom) + var(--ar-h) * 2 + var(--ar-gap) * 2 + 14px);
         left: 50%;
         transform: translateX(-50%);
         z-index: 9998;
         display: flex;
         align-items: center;
-        gap: 12px;
-        background: rgba(0, 0, 0, 0.62);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(74,184,216,0.35);
+        gap: 9px;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(74,184,216,0.30);
         border-radius: 50px;
-        padding: 14px 22px;
+        padding: 10px 18px;
         pointer-events: none;
         opacity: 0;
         transition: opacity .4s ease;
-        animation: ar-hotspot-hint-float 2.8s ease-in-out infinite;
+        animation: ar-hotspot-hint-float 3s ease-in-out infinite;
       }
       #ar-hotspot-hint.ar-hotspot-hint-visible { opacity: 1; }
       #ar-hotspot-hint.ar-hotspot-hint-hidden  { opacity: 0; }
       @keyframes ar-hotspot-hint-float {
         0%, 100% { transform: translateX(-50%) translateY(0px); }
-        50%       { transform: translateX(-50%) translateY(-5px); }
+        50%       { transform: translateX(-50%) translateY(-4px); }
       }
       .ar-hotspot-hint-icon {
-        width: 28px; height: 28px; flex-shrink: 0;
-        animation: ar-hotspot-hint-pulse 1.5s ease-in-out infinite;
+        width: 20px; height: 20px; flex-shrink: 0;
+        animation: ar-hotspot-hint-pulse 1.6s ease-in-out infinite;
       }
       @keyframes ar-hotspot-hint-pulse {
-        0%,100% { transform: scale(1);   opacity: .7; }
-        50%      { transform: scale(1.18); opacity: 1; }
+        0%,100% { transform: scale(1);    opacity: .65; }
+        50%      { transform: scale(1.15); opacity: 1; }
       }
       .ar-hotspot-hint-text {
         font-family: var(--ar-font);
-        font-size: 13px; font-weight: 500;
-        letter-spacing: .06em;
-        color: rgba(255,255,255,.92);
+        font-size: 11px; font-weight: 500;
+        letter-spacing: .07em;
+        color: rgba(255,255,255,.88);
         white-space: nowrap;
       }
 
@@ -643,11 +643,10 @@ export class ArUiOverlay {
     div.id = 'ar-hotspot-hint'
     div.innerHTML = `
       <svg class="ar-hotspot-hint-icon" viewBox="0 0 32 32" fill="none"
-           stroke="rgba(74,184,216,1)" stroke-width="1.8"
+           stroke="rgba(74,184,216,1)" stroke-width="2"
            stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="16" cy="13" r="5"/>
         <path d="M16 2C10.48 2 6 6.48 6 12c0 7.5 10 18 10 18s10-10.5 10-18c0-5.52-4.48-10-10-10z"/>
-        <circle cx="16" cy="12" r="2.5" fill="rgba(74,184,216,0.5)" stroke="none"/>
+        <circle cx="16" cy="12" r="3" fill="rgba(74,184,216,0.6)" stroke="none"/>
       </svg>
       <span class="ar-hotspot-hint-text">Tap a pin to explore 360°</span>`
     document.body.appendChild(div)
