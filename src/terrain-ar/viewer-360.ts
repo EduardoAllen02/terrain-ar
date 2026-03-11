@@ -775,12 +775,12 @@ export class Viewer360 {
       this._touchDeltaPitch = 0
 
       if (this._gyroOk) {
-        // Extract the current camera's yaw and pitch (roll is 0 or near-0
-        // because gyro bakes it and leveling cleans it).
+        // The camera quat may include _q1 and _qOrient transforms from the gyro
+        // pipeline. We must strip roll first so that Euler YXZ decomposition
+        // gives a clean yaw/pitch in world space.
         const { THREE } = this
-        const euler = new THREE.Euler().setFromQuaternion(
-          this.camera.quaternion, 'YXZ',
-        )
+        const leveledQuat = this._deRoll(this.camera.quaternion)
+        const euler = new THREE.Euler().setFromQuaternion(leveledQuat, 'YXZ')
         this._touchBaseYaw   = euler.y
         this._touchBasePitch = euler.x
       }
@@ -799,7 +799,7 @@ export class Viewer360 {
       if (this._gyroOk) {
         // Accumulate deltas as plain scalars — no quaternion multiplication,
         // no roll accumulation possible.
-        this._touchDeltaYaw   -= dx * SENS
+        this._touchDeltaYaw   += dx * SENS
         this._touchDeltaPitch += dy * SENS
 
         this.camera.quaternion.copy(
