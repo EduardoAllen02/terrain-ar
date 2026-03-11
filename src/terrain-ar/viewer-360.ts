@@ -219,15 +219,31 @@ export class Viewer360 {
   private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
   private _gyroOk = false
-  private _euler:   any = null
-  private _q1:      any = null
-  private _qOrient: any = null
-  private _zee:     any = null
+  private _euler:         any = null
+  private _q1:            any = null
+  private _qOrient:       any = null
+  private _zee:           any = null
+  /**
+   * Rotational offset accumulated from touch sessions.
+   * Applied on top of the raw gyro quaternion so that
+   * the view stays at point B after the user lifts their finger.
+   * Initialised to identity in _initRenderer().
+   */
+  private _gyroCorrection: any = null
 
-  // ── Touch drag ───────────────────────────────────────────────────────────
-  // Used in BOTH gyro mode (as additive offset) and touch-only mode (absolute).
-  // Reset to 0 on each image navigation.
-  private _drag = { active: false, lastX: 0, lastY: 0, lon: 0, lat: 0 }
+  // ── Touch drag ────────────────────────────────────────────────────────────
+  /**
+   * Quaternion captured at the moment the finger touches the screen.
+   * Touch drag modifies this quaternion in-place and drives the camera
+   * directly while the finger is down (gyro is ignored).
+   */
+  private _touchBaseQuat: any = null
+  private _isTouching = false
+  /** Last raw touch coordinates used for incremental delta calculation. */
+  private _lastTouchX = 0
+  private _lastTouchY = 0
+  /** lon/lat for touch-ONLY mode (no gyro). Not used when gyro is active. */
+  private _drag = { lon: 0, lat: 0 }
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
   private _onTouchEnd:   (() => void)              | null = null
@@ -377,9 +393,10 @@ export class Viewer360 {
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
-    // Reset look direction to centre for the new image
+    // Reset look direction and gyro correction for the new image
     this._drag.lon = 0
     this._drag.lat = 0
+    if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1) // identity
 
     this._hideLoading()
     this._updateNavButtons()
@@ -547,6 +564,8 @@ export class Viewer360 {
     this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
     this._qOrient  = new THREE.Quaternion()
     this._zee      = new THREE.Vector3(0, 0, 1)
+    // Identity correction — no offset until the user first drags
+    this._gyroCorrection = new THREE.Quaternion()
   }
 
   private _fullDispose(): void {
@@ -617,56 +636,111 @@ export class Viewer360 {
   }
 
   // ── Touch drag ────────────────────────────────────────────────────────────
-  // In gyro mode:   while finger is DOWN, gyro is frozen and touch drives the
-  //                 view exclusively. On finger UP, gyro resumes from the
-  //                 device's physical orientation (accumulated offset resets).
-  // In touch-only:  lon/lat are the absolute look angles at all times.
-  // Vertical range: ±89° (allows looking straight up/down without gimbal lock).
+  // GYRO MODE — seamless handoff via correction quaternion:
+  //   touchstart → capture camera.quaternion as _touchBaseQuat; gyro ignored.
+  //   touchmove  → apply incremental yaw/pitch to _touchBaseQuat; camera
+  //                follows the finger from exactly point A — no jump.
+  //   touchend   → correction = gyroQuat⁻¹ × finalCameraQuat
+  //                gyro resumes: camera = gyroQuat × correction = point B ✓
+  //
+  // TOUCH-ONLY MODE — classic lon/lat spherical, vertical ±89°.
+
+  /** Returns the raw gyro quaternion for the current device orientation. */
+  private _computeGyroQuat(): any {
+    const { THREE } = this
+    const alpha  = THREE.MathUtils.degToRad(this._alpha)
+    const beta   = THREE.MathUtils.degToRad(this._beta)
+    const gamma  = THREE.MathUtils.degToRad(this._gamma)
+    const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
+    const e = new THREE.Euler(beta, alpha, -gamma, 'YXZ')
+    const q = new THREE.Quaternion().setFromEuler(e)
+    q.multiply(this._q1)
+    const qOrient = new THREE.Quaternion().setFromAxisAngle(this._zee, -orient)
+    q.multiply(qOrient)
+    return q
+  }
 
   private _startTouchDrag(): void {
-    const d = this._drag
-    d.lon = 0; d.lat = 0; d.active = false
+    this._drag.lon = 0
+    this._drag.lat = 0
+    this._isTouching = false
 
     this._onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
-      d.active = true
-      d.lastX  = e.touches[0].clientX
-      d.lastY  = e.touches[0].clientY
-    }
-    this._onTouchMove = (e: TouchEvent) => {
-      if (!d.active || e.touches.length !== 1) return
-      d.lon -= (e.touches[0].clientX - d.lastX) * 0.25
-      d.lat += (e.touches[0].clientY - d.lastY) * 0.15
-      d.lat  = Math.max(-89, Math.min(89, d.lat))
-      d.lastX = e.touches[0].clientX
-      d.lastY = e.touches[0].clientY
-    }
-    this._onTouchEnd = () => {
-      d.active = false
-      // In gyro mode: reset accumulated lon/lat so when the user next touches,
-      // they drag from the current physical orientation, not a stale offset.
+
+      this._isTouching = true
+      this._lastTouchX = e.touches[0].clientX
+      this._lastTouchY = e.touches[0].clientY
+
       if (this._gyroOk) {
-        d.lon = 0
-        d.lat = 0
+        // Snapshot the exact frame the user sees right now.
+        this._touchBaseQuat = this.camera.quaternion.clone()
+      }
+    }
+
+    this._onTouchMove = (e: TouchEvent) => {
+      if (!this._isTouching || e.touches.length !== 1) return
+
+      const dx = e.touches[0].clientX - this._lastTouchX
+      const dy = e.touches[0].clientY - this._lastTouchY
+      this._lastTouchX = e.touches[0].clientX
+      this._lastTouchY = e.touches[0].clientY
+
+      if (this._gyroOk && this._touchBaseQuat) {
+        const { THREE } = this
+        const SENS = 0.003 // radians per pixel
+
+        // Yaw: rotate around world Y
+        const yawQ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0), dx * SENS,
+        )
+        // Pitch: rotate around the camera's own right vector
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
+        const pitchQ = new THREE.Quaternion().setFromAxisAngle(right, dy * SENS)
+
+        // Accumulate into base, then push to camera
+        this._touchBaseQuat.premultiply(yawQ).premultiply(pitchQ)
+        this.camera.quaternion.copy(this._touchBaseQuat)
+      } else if (!this._gyroOk) {
+        this._drag.lon -= dx * 0.25
+        this._drag.lat += dy * 0.15
+        this._drag.lat  = Math.max(-89, Math.min(89, this._drag.lat))
+      }
+    }
+
+    this._onTouchEnd = () => {
+      if (!this._isTouching) return
+      this._isTouching = false
+
+      if (this._gyroOk) {
+        // Bake the drag result into _gyroCorrection so gyro resumes from point B.
+        const gyroQ = this._computeGyroQuat()
+        this._gyroCorrection = gyroQ.clone().invert().multiply(
+          this.camera.quaternion.clone(),
+        )
       }
     }
 
     const canvas = document.getElementById('v360-canvas')!
-    canvas.addEventListener('touchstart', this._onTouchStart, { passive: true })
-    canvas.addEventListener('touchmove',  this._onTouchMove,  { passive: true })
-    canvas.addEventListener('touchend',   this._onTouchEnd,   { passive: true })
-    canvas.addEventListener('touchcancel', this._onTouchEnd,  { passive: true })
+    canvas.addEventListener('touchstart',  this._onTouchStart, { passive: true })
+    canvas.addEventListener('touchmove',   this._onTouchMove,  { passive: true })
+    canvas.addEventListener('touchend',    this._onTouchEnd,   { passive: true })
+    canvas.addEventListener('touchcancel', this._onTouchEnd,   { passive: true })
   }
 
   private _stopTouchDrag(): void {
     const canvas = document.getElementById('v360-canvas')
     if (!canvas) return
-    if (this._onTouchStart) canvas.removeEventListener('touchstart', this._onTouchStart)
-    if (this._onTouchMove)  canvas.removeEventListener('touchmove',  this._onTouchMove)
-    if (this._onTouchEnd)   canvas.removeEventListener('touchend',   this._onTouchEnd)
+    if (this._onTouchStart) canvas.removeEventListener('touchstart',  this._onTouchStart)
+    if (this._onTouchMove)  canvas.removeEventListener('touchmove',   this._onTouchMove)
+    if (this._onTouchEnd) {
+      canvas.removeEventListener('touchend',    this._onTouchEnd)
+      canvas.removeEventListener('touchcancel', this._onTouchEnd)
+    }
     this._onTouchStart = this._onTouchMove = this._onTouchEnd = null
+    this._isTouching = false
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
@@ -678,23 +752,12 @@ export class Viewer360 {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
-      if (this._gyroOk && !this._drag.active) {
-        // ── Gyro mode (finger not on screen) ──────────────────────────────
-        // Device physical orientation drives the camera entirely.
-        // No touch offset is applied — gyro is the sole authority.
-        const alpha  = THREE.MathUtils.degToRad(this._alpha)
-        const beta   = THREE.MathUtils.degToRad(this._beta)
-        const gamma  = THREE.MathUtils.degToRad(this._gamma)
-        const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
-        this._euler.set(beta, alpha, -gamma, 'YXZ')
-        this.camera.quaternion.setFromEuler(this._euler)
-        this.camera.quaternion.multiply(this._q1)
-        this._qOrient.setFromAxisAngle(this._zee, -orient)
-        this.camera.quaternion.multiply(this._qOrient)
-      } else {
-        // ── Touch mode (finger down OR no gyro available) ─────────────────
-        // lon/lat define the absolute look direction.
-        // lat ±89° allows looking straight up/down without gimbal lock.
+      if (this._gyroOk && !this._isTouching) {
+        // Gyro drives camera; correction preserves the user's last drag position.
+        // camera = gyroQuat × _gyroCorrection
+        this.camera.quaternion.copy(this._computeGyroQuat()).multiply(this._gyroCorrection)
+      } else if (!this._gyroOk) {
+        // Touch-only: lookAt from lon/lat
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(
@@ -703,6 +766,7 @@ export class Viewer360 {
           500 * Math.sin(phi) * Math.sin(theta),
         )
       }
+      // _gyroOk && _isTouching: camera already updated live in touchmove.
 
       this.renderer.render(this.scene, this.camera)
     }
