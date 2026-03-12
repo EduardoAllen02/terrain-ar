@@ -1,23 +1,37 @@
 /**
- * Viewer360 — v6
+ * Viewer360 — v7
  *
- * Base: v4 (fluido, gyro + touchBaseQuat).
+ * Base: v4 (fluido). Cambios mínimos para corregir dos bugs:
  *
- * Problema de v4: tras un drag horizontal grande (~180°), el quaternion de
- * corrección acumulado (_gyroCorrection = gyroQuat⁻¹ × dragQuat) conjuga
- * los deltas futuros del gyro, invirtiendo los controles.
+ * BUG 1 — "Al soltar el dedo la imagen vuelve al punto original"
+ *   (v6): al reiniciar gyro con correction=identity, camera = gyroQuat que apunta
+ *   a donde está el teléfono físicamente, no donde dejó el dedo. Fix: se mantiene
+ *   la corrección, pero almacenada como offsets Euler escalares (ver abajo).
  *
- * Fix (mínimo):
- *   1. touchstart → _gyroOk = false. El gyro se "apaga" durante el drag.
- *      El touchBaseQuat maneja la cámara exclusivamente (como en v4).
- *   2. touchend  → leveling animado (igual que v4), luego al terminar:
- *      _gyroCorrection = identity, _gyroOk = true.
- *      El gyro arranca LIMPIO. camera = gyroQuat × identity = gyroQuat.
- *      Sin correction quaternion → sin conjugación → sin inversión posible.
- *   3. Snap tras restart: en la práctica el teléfono se mueve físicamente
- *      ~igual que el drag, por lo que gyroQuat ≈ posición del dedo. OK.
- *   4. Límite vertical ±70° en touch (gyro y touch-only) para que el snap
- *      horizontal sea imperceptible y el usuario no quede mirando al cénit.
+ * BUG 2 — "Después de un drag de ~180°, el gyro controla al revés"
+ *   (v4): correction = gyroQuat⁻¹ × dragQuat. Cuando dragQuat ≈ R_180_Y,
+ *   camera = gyroQuat_new × R_180_Y. R_180_Y voltea el eje X local del gyro:
+ *   inclinar el teléfono arriba → la cámara baja.
+ *
+ * ROOT FIX — Corrección como offsets Euler aditivos (no quaternion derecho)
+ *
+ *   En lugar de: camera = gyroQuat × correction_quat
+ *   Usamos:      camera = Euler(β + pitchOff, α + yawOff, −γ, YXZ) × _q1 × _qOrient
+ *
+ *   Los offsets se calculan una sola vez al terminar el leveling:
+ *     targetQuat = leveledQuat × qOrient⁻¹ × _q1⁻¹
+ *     _yawOffDeg   = targetEuler.y  − _alpha   (deg)
+ *     _pitchOffDeg = targetEuler.x  − _beta    (deg)
+ *
+ *   Con esto, cuando el gyro corre con (_alpha, _beta) actuales, produce
+ *   exactamente leveledQuat. Y a medida que (α,β) cambian, la suma de grados
+ *   es lineal y nunca conjuga ningún delta → imposible invertir a cualquier offset.
+ *
+ *   Adicionalmente:
+ *   • _gyroOk = false en touchstart (gyro completamente apagado durante drag,
+ *     evita conflicto entre touch y gyro).
+ *   • Pitch limitado a ±MAX_PITCH_DEG en touch y en gyro para evitar que el
+ *     usuario quede mirando al cénit antes del restart.
  */
 
 import {probeGyroscope} from './device-check'
@@ -28,7 +42,8 @@ const BASE_PATH    = 'assets/360/'
 const IMAGE_EXT    = '.jpg'
 const MANIFEST_URL = `${BASE_PATH}manifest.json`
 
-const MAX_PITCH_DEG = 70  // ±70° from horizon — limits touch AND gyro pitch
+/** Vertical look limit in degrees from horizon. Applied to both touch and gyro. */
+const MAX_PITCH_DEG = 70
 
 interface HotspotEntry {
   folder: string
@@ -222,22 +237,26 @@ export class Viewer360 {
   private _gyroHandler:   ((e: DeviceOrientationEvent) => void) | null = null
   private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
+  private _gyroOk  = false   // active flag — false during touch drag
+  private _hasGyro = false   // permanent — device has gyro, never reset to false
+  private _euler:  any = null
+  private _q1:     any = null
+  private _zee:    any = null
+
+  // ── Gyro offsets (replaces _gyroCorrection quaternion) ────────────────────
   /**
-   * Whether the gyro is currently ACTIVE (driving the render loop).
-   * Set to false on touchstart, restored to true after leveling completes.
+   * Additive degree offsets applied to (alpha, beta) inside _computeGyroQuat.
+   *
+   *   camera = Euler(β + _pitchOffDeg, α + _yawOffDeg, −γ, YXZ) × _q1 × _qOrient
+   *
+   * Computed once at the end of each leveling animation so that the gyro
+   * resumes from exactly the leveled drag position.
+   *
+   * Being scalars added BEFORE the quaternion conversion, they can never
+   * conjugate gyro deltas → no inversion at any horizontal drag angle.
    */
-  private _gyroOk   = false
-  /**
-   * Permanent flag: true if this device has gyro and it was initialized.
-   * Never reset to false — used to distinguish "gyro paused during touch"
-   * from "device has no gyro at all".
-   */
-  private _hasGyro  = false
-  private _euler:         any = null
-  private _q1:            any = null
-  private _qOrient:       any = null
-  private _zee:           any = null
-  private _gyroCorrection: any = null
+  private _yawOffDeg   = 0
+  private _pitchOffDeg = 0
 
   // ── Touch drag ────────────────────────────────────────────────────────────
   private _touchBaseQuat: any = null
@@ -394,9 +413,10 @@ export class Viewer360 {
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
-    this._drag.lon = 0
-    this._drag.lat = 0
-    if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1)
+    this._drag.lon   = 0
+    this._drag.lat   = 0
+    this._yawOffDeg  = 0
+    this._pitchOffDeg = 0
     this._cancelLeveling()
 
     this._hideLoading()
@@ -559,9 +579,7 @@ export class Viewer360 {
     this.texLoader = new THREE.TextureLoader()
     this._euler    = new THREE.Euler()
     this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
-    this._qOrient  = new THREE.Quaternion()
     this._zee      = new THREE.Vector3(0, 0, 1)
-    this._gyroCorrection = new THREE.Quaternion()
   }
 
   private _fullDispose(): void {
@@ -614,7 +632,7 @@ export class Viewer360 {
 
   private _startGyro(): void {
     this._gyroOk  = true
-    this._hasGyro = true   // permanent — never reset to false
+    this._hasGyro = true
     this._gyroHandler = (e: DeviceOrientationEvent) => {
       if (e.alpha === null) return
       this._alpha = e.alpha
@@ -631,6 +649,32 @@ export class Viewer360 {
     }
     this._gyroOk  = false
     this._hasGyro = false
+  }
+
+  // ── Gyro quaternion ───────────────────────────────────────────────────────
+
+  /**
+   * Builds the camera quaternion from device orientation + current offsets.
+   *
+   * Offsets (_yawOffDeg, _pitchOffDeg) are added to the raw device angles
+   * BEFORE the quaternion conversion so they never conjugate gyro deltas.
+   * A 180° yaw offset simply shifts where "north" is — it doesn't flip axes.
+   */
+  private _computeGyroQuat(): any {
+    const { THREE } = this
+    const alpha  = THREE.MathUtils.degToRad(this._alpha + this._yawOffDeg)
+    const beta   = THREE.MathUtils.degToRad(
+      Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, this._beta + this._pitchOffDeg)),
+    )
+    const gamma  = THREE.MathUtils.degToRad(this._gamma)
+    const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
+
+    this._euler.set(beta, alpha, -gamma, 'YXZ')
+    const q = new this.THREE.Quaternion().setFromEuler(this._euler)
+    q.multiply(this._q1)
+    const qOrient = new this.THREE.Quaternion().setFromAxisAngle(this._zee, -orient)
+    q.multiply(qOrient)
+    return q
   }
 
   // ── Leveling ──────────────────────────────────────────────────────────────
@@ -652,22 +696,44 @@ export class Viewer360 {
   }
 
   /**
-   * Animates from fromQuat to its de-rolled version (ease-out cubic, 380ms).
+   * Leveling animation: slerp from fromQuat to de-rolled version (380ms ease-out).
    *
-   * KEY CHANGE vs v4: on completion, instead of baking a correction quaternion
-   * (which caused inversion after large drags), we:
-   *   1. Reset _gyroCorrection to identity.
-   *   2. Set _gyroOk = true.
-   * The gyro restarts completely clean. camera = gyroQuat × identity = gyroQuat.
-   * No correction → no possible conjugation → no inversion at any drag angle.
+   * On completion, bakes the offset so gyro resumes from exactly that position.
+   *
+   * HOW THE OFFSET IS BAKED (key to no-inversion):
+   *   We want: _computeGyroQuat() = leveledQuat
+   *   Expanding: Euler(β+pitchOff, α+yawOff, −γ, YXZ) × _q1 × _qOrient = leveledQuat
+   *   Therefore: Euler(β+pitchOff, α+yawOff, −γ, YXZ) = leveledQuat × _qOrient⁻¹ × _q1⁻¹
+   *   Extract yaw (Y) and pitch (X) from that Euler:
+   *     yawOff   = extractedEuler.y − current_alpha  (radians → degrees)
+   *     pitchOff = extractedEuler.x − current_beta
+   *
+   * Because the offsets are plain degree additions to (alpha, beta), the gyro
+   * physics (alpha changes → yaw changes, beta changes → pitch changes) always
+   * work correctly regardless of offset magnitude.
    */
+  private _bakeOffsets(leveledQuat: any): void {
+    const { THREE } = this
+    const orient  = THREE.MathUtils.degToRad(getOrientAngleDeg())
+    const qOrient = new THREE.Quaternion().setFromAxisAngle(this._zee, -orient)
+
+    // Invert the _q1 × qOrient tail to isolate the Euler component
+    const tail    = this._q1.clone().multiply(qOrient)
+    const target  = leveledQuat.clone().multiply(tail.invert())
+    const euler   = new THREE.Euler().setFromQuaternion(target, 'YXZ')
+
+    this._yawOffDeg   = THREE.MathUtils.radToDeg(euler.y) - this._alpha
+    this._pitchOffDeg = THREE.MathUtils.radToDeg(euler.x) - this._beta
+    this._pitchOffDeg = Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, this._pitchOffDeg))
+  }
+
   private _startLevelingAnimation(fromQuat: any): void {
     this._cancelLeveling()
     const toQuat = this._deRoll(fromQuat)
 
-    // Already level — restart gyro immediately
+    // Already level — bake offset and re-enable gyro immediately
     if (Math.abs(fromQuat.dot(toQuat)) > 0.9998) {
-      this._gyroCorrection.set(0, 0, 0, 1)
+      this._bakeOffsets(fromQuat)
       this._gyroOk = true
       return
     }
@@ -690,40 +756,23 @@ export class Viewer360 {
       if (raw < 1) {
         this._levelingRaf = requestAnimationFrame(step)
       } else {
-        // Leveling complete — restart gyro clean (identity correction)
+        // Leveling complete — bake Euler offsets so gyro resumes from point B
         this._isLeveling = false
-        this._gyroCorrection.set(0, 0, 0, 1)
+        this._bakeOffsets(this._levelingTo)
         this._gyroOk = true
       }
     }
     this._levelingRaf = requestAnimationFrame(step)
   }
 
-  /** Raw gyro quaternion for current device orientation. */
-  private _computeGyroQuat(): any {
-    const { THREE } = this
-    const alpha  = THREE.MathUtils.degToRad(this._alpha)
-    const beta   = THREE.MathUtils.degToRad(this._beta)
-    const gamma  = THREE.MathUtils.degToRad(this._gamma)
-    const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
-    const e = new THREE.Euler(beta, alpha, -gamma, 'YXZ')
-    const q = new THREE.Quaternion().setFromEuler(e)
-    q.multiply(this._q1)
-    const qOrient = new THREE.Quaternion().setFromAxisAngle(this._zee, -orient)
-    q.multiply(qOrient)
-    return q
-  }
-
   // ── Touch drag ────────────────────────────────────────────────────────────
   //
   // GYRO MODE:
-  //   touchstart → _gyroOk = false (gyro fully disabled for duration of touch).
+  //   touchstart → _gyroOk = false (gyro fully off during drag).
   //                Capture camera.quaternion as _touchBaseQuat.
-  //   touchmove  → apply yaw/pitch deltas to _touchBaseQuat, with pitch
-  //                clamped to ±MAX_PITCH_DEG (prevents looking near zenith).
-  //   touchend   → leveling animation (380ms ease-out to roll=0).
-  //                On completion: _gyroCorrection = identity, _gyroOk = true.
-  //                Gyro restarts CLEAN — no inversion possible at any drag angle.
+  //   touchmove  → apply world-space yaw + level-right pitch to _touchBaseQuat.
+  //                Pitch clamped to ±MAX_PITCH_DEG.
+  //   touchend   → leveling animation → _bakeOffsets → _gyroOk = true.
   //
   // TOUCH-ONLY MODE — classic lon/lat spherical, vertical ±MAX_PITCH_DEG.
 
@@ -737,20 +786,16 @@ export class Viewer360 {
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
 
-      // Cancel any in-progress leveling
       this._cancelLeveling()
 
-      // Disable gyro for the duration of the touch.
-      // _gyroCorrection is cleared so gyro restarts clean on touchend.
+      // Disable gyro for the entire duration of the touch.
+      // _touchBaseQuat drives the camera exclusively while finger is down.
       this._gyroOk = false
-      if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1)
 
       this._isTouching = true
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
 
-      // Always capture base quaternion (used in both gyro and touch-only paths
-      // when _hasGyro, not used in pure touch-only lat/lon path)
       if (this._hasGyro) {
         this._touchBaseQuat = this.camera.quaternion.clone()
       }
@@ -765,37 +810,34 @@ export class Viewer360 {
       this._lastTouchY = e.touches[0].clientY
 
       if (this._hasGyro && this._touchBaseQuat) {
-        // Gyro device — use quaternion-based drag (preserves roll=0 during drag)
         const { THREE } = this
         const SENS = 0.003
         const MAX_PITCH_RAD = THREE.MathUtils.degToRad(MAX_PITCH_DEG)
 
-        // Yaw: always applied (no vertical limit on horizontal panning)
+        // Yaw: world Y axis (no vertical limit)
         const yawQ = new THREE.Quaternion().setFromAxisAngle(
           new THREE.Vector3(0, 1, 0), dx * SENS,
         )
         this._touchBaseQuat.premultiply(yawQ)
 
-        // Pitch: apply only if result is within ±MAX_PITCH_DEG from horizon
+        // Pitch: level right axis — prevents roll accumulation on tilted device.
+        // Only applied if result stays within ±MAX_PITCH_DEG.
         const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
         camRight.y = 0
         if (camRight.lengthSq() < 0.001) camRight.set(1, 0, 0)
         camRight.normalize()
         const pitchQ = new THREE.Quaternion().setFromAxisAngle(camRight, dy * SENS)
 
-        // Test result before committing
         const testQuat = this._touchBaseQuat.clone().premultiply(pitchQ)
         const fwd      = new THREE.Vector3(0, 0, -1).applyQuaternion(testQuat)
-        // fwd.y = sin(pitchAngle): positive = looking up, negative = looking down
-        const pitchAngle = Math.asin(Math.max(-1, Math.min(1, fwd.y)))
-        if (Math.abs(pitchAngle) < MAX_PITCH_RAD) {
+        const pitchAng = Math.asin(Math.max(-1, Math.min(1, fwd.y)))
+        if (Math.abs(pitchAng) < MAX_PITCH_RAD) {
           this._touchBaseQuat.premultiply(pitchQ)
         }
 
         this.camera.quaternion.copy(this._touchBaseQuat)
 
       } else if (!this._hasGyro) {
-        // Touch-only (no gyro on device)
         this._drag.lon -= dx * 0.25
         this._drag.lat += dy * 0.15
         this._drag.lat  = Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, this._drag.lat))
@@ -806,11 +848,10 @@ export class Viewer360 {
       if (!this._isTouching) return
       this._isTouching = false
 
-      // _hasGyro: leveling animation → gyro restarts clean on completion
       if (this._hasGyro) {
+        // Level + bake Euler offsets + re-enable gyro
         this._startLevelingAnimation(this.camera.quaternion.clone())
       }
-      // touch-only: no leveling needed, _drag.lon/lat hold the position
     }
 
     const canvas = document.getElementById('v360-canvas')!
@@ -844,13 +885,12 @@ export class Viewer360 {
       this.rafId = requestAnimationFrame(tick)
 
       if (this._isLeveling) {
-        // Leveling animation runs its own RAF — render only
+        // Leveling animation drives camera via its own RAF — just render
       } else if (this._gyroOk) {
-        // Gyro active (not currently touching — _gyroOk is false during touch)
-        // _gyroCorrection is identity here (reset on touchstart / leveling end)
-        this.camera.quaternion.copy(this._computeGyroQuat()).multiply(this._gyroCorrection)
+        // Gyro active (finger not on screen). Offsets encode where finger left off.
+        this.camera.quaternion.copy(this._computeGyroQuat())
       } else if (!this._hasGyro) {
-        // Pure touch-only device: lookAt from lon/lat
+        // Pure touch-only device
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(
@@ -859,11 +899,7 @@ export class Viewer360 {
           500 * Math.sin(phi) * Math.sin(theta),
         )
       }
-      // _hasGyro && !_gyroOk && _isTouching:
-      //   camera was updated live in touchmove (_touchBaseQuat path). No-op here.
-      // _hasGyro && !_gyroOk && !_isTouching && !_isLeveling:
-      //   transient state during touchend before _startLevelingAnimation runs.
-      //   Camera holds last touchmove position. Fine — next frame leveling starts.
+      // _hasGyro && !_gyroOk && _isTouching: camera updated live in touchmove
 
       this.renderer.render(this.scene, this.camera)
     }
