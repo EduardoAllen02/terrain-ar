@@ -178,7 +178,6 @@ ecs.registerComponent({
 
       reRegisterResetBtn()
     }
-
     // ── Reset button ───────────────────────────────────────────────────────
     const registerResetBtn = () => {
       ui.showResetButton(() => {
@@ -188,9 +187,6 @@ ecs.registerComponent({
         performReset(registerResetBtn).then(() => restoreArUi())
       })
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-
     // ── loading ───────────────────────────────────────────────────────────
 
     ecs.defineState('loading').initial()
@@ -246,9 +242,7 @@ ecs.registerComponent({
 
         dataAttribute.cursor(eid).placed = true
 
-        // Show "tap a pin" hint only on first placement, and only AFTER
-        // gesture hints have fully faded (they auto-dismiss at 5000ms + 450ms fade).
-        // Cancel the timer if the user taps a pin before it fires.
+        // Show "tap a pin" hint only on first placement
         if (!hotspotHintShown) {
           hotspotHintShown = true
           hotspotHintTimer = window.setTimeout(() => ui.showHotspotHint(), 6200)

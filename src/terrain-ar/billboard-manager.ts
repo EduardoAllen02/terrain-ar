@@ -169,13 +169,9 @@ export class BillboardManager {
     let closestDist = Infinity
 
     for (const b of hotspots) {
-      // sprite.center = (0.5, 0) → sprite.position is the PIN TIP (bottom centre).
-      // The full PNG extends upward from the tip by sprite.scale.y world units.
-      // We need the VISUAL CENTRE of the sprite in NDC for accurate hit testing.
-
       const tipNDC = b.sprite.position.clone().project(cam)
 
-      // Sprites always face the camera, so "sprite up" = camera up in world space.
+      // Sprites always face the camera
       const camUp = new this.THREE.Vector3(0, 1, 0)
         .transformDirection(cam.matrixWorld)
         .normalize()
@@ -189,9 +185,6 @@ export class BillboardManager {
       const cx = (tipNDC.x + topNDC.x) * 0.5
       const cy = (tipNDC.y + topNDC.y) * 0.5
 
-      // Hit radius = half the sprite's NDC height (covers the full image).
-      // Also include half the NDC width so wide PNGs are fully tappable.
-      // Take the max with the 44px minimum touch target.
       const ndcH     = Math.abs(topNDC.y - tipNDC.y)
       const ndcW     = ndcH * (b.sprite.scale.x / b.sprite.scale.y)
       const hitR     = Math.max(Math.max(ndcH, ndcW) * 0.6, minNDC)

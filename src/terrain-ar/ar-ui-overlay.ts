@@ -1,18 +1,3 @@
-/**
- * ArUiOverlay — v11
- *
- * Changes vs v10:
- *  • Close button is ALWAYS visible in AR from the start (no longer
- *    hidden until fullscreen is entered). It sits at top-right.
- *  • Fullscreen button is repositioned to the LEFT of the close button.
- *    On tap: enters fullscreen + activates maintainFullscreen + hides itself.
- *    No exit-fullscreen button exists anywhere.
- *  • `_revealCloseButton()` removed — close button is shown immediately.
- *  • `showHotspotHint()` / `hideHotspotHint()` added — pulsing overlay
- *    that appears when the terrain is first placed, suggesting the user
- *    to tap a hotspot pin to open a 360 view.
- */
-
 // ── Client config ─────────────────────────────────────────────────────────────
 
 const FULLSCREEN_BTN_IMG = 'assets/ui/fullscreen-btn.png'
@@ -562,12 +547,7 @@ export class ArUiOverlay {
     setTimeout(() => el.remove(), 480)
   }
 
-  // ── PNG Fullscreen button ─────────────────────────────────────────────────
-  /**
-   * Shows the client-supplied PNG at top-right (to the left of the close button).
-   * On tap: enters fullscreen + activates maintainFullscreen + hides itself.
-   * There is intentionally NO exit-fullscreen button.
-   */
+  // ── PNG Fullscreen button 
   showFullscreenButton(): void {
     injectStyles()
     if (this.fsBtn) return
@@ -594,11 +574,7 @@ export class ArUiOverlay {
     setTimeout(() => el.remove(), 280)
   }
 
-  // ── X Close button ────────────────────────────────────────────────────────
-  /**
-   * Shows the X close button immediately (always visible in AR).
-   * Closes the entire tab / redirects when tapped.
-   */
+  // ── X Close button 
   showCloseButton(): void {
     injectStyles()
     if (this.closeBtn) return

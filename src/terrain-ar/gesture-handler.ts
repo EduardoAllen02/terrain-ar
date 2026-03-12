@@ -28,9 +28,6 @@ export class GestureHandler {
   private listeners: Array<[EventTarget, string, EventListener]> = []
 
   // ── single-finger drag state ──────────────────────────────────────────────
-  // dragPlaneY  : world Y of the horizontal drag plane (model Y at drag start)
-  // dragOffset  : model world pos minus the first ray-hit on the plane
-  //               so the model doesn't snap its centre to the finger
   private sf: {
     id:         number
     dragPlaneY: number
@@ -96,8 +93,7 @@ export class GestureHandler {
 
   /**
    * Cast a ray from the camera through NDC coords onto a horizontal plane
-   * at world Y = planeY. Returns the THREE.Vector3 hit point, or null if
-   * the ray is parallel to the plane (extremely unlikely in normal AR use).
+   * at world Y = planeY. Returns the THREE.Vector3 hit point.
    */
   private _rayHitAtY(clientX: number, clientY: number, planeY: number): any | null {
     const cam = this._getCamera()

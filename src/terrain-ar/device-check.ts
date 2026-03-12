@@ -1,9 +1,5 @@
 /**
  * DeviceCheck
- *
- * Detects AR/gyro/camera compatibility BEFORE starting.
- * All user-facing alerts are bilingual: English + Italian.
- *
  * Camera denied bug note:
  *   The AR experience is opened via a link/button from an external site
  *   (new tab or redirect). Some browsers ask for camera permission again
