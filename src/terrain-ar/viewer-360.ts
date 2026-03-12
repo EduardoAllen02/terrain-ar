@@ -1,15 +1,32 @@
 /**
- * Viewer360 — v5
+ * Viewer360 — v6
  *
- * Changes vs v4:
- *  • Fixed gyro inversion after large touch drags (e.g. 180°).
- *    Root cause: _gyroCorrection = gyroQuat⁻¹ × dragQuat would flip the gyro
- *    frame when the drag exceeded ~180°.
- *    Fix: touch is now a TEMPORARY override. On touchend:
- *      1. No correction is baked — gyro always runs in its natural frame.
- *      2. Camera animates smoothly from drag position → current gyro
- *         orientation over 450ms (ease-out cubic). Inversion impossible.
- *    This matches the UX of Google Street View.
+ * Root-cause fix for two bugs in v4/v5:
+ *
+ * BUG 1 — "view snaps back when lifting finger"
+ *   In v4/v5: camera = gyroQuat × correction.
+ *   correction was baked after a leveling animation. Race between the
+ *   animation RAF and the gyro render loop → camera jumped back.
+ *
+ * BUG 2 — "gyro controls invert after 180° touch drag"
+ *   camera = gyroQuat × R_180_Y conjugates every gyro delta:
+ *   R_180_Y flips the X axis so physical "tilt up" becomes camera "down".
+ *
+ * ROOT FIX — Additive Euler offsets (replaces correction quaternion entirely)
+ *
+ *   camera = Euler(β + pitchOff, α + yawOff, −γ, YXZ) × _q1 × _qOrient
+ *
+ *   α, β, γ  = live device gyro angles (always in natural device frame).
+ *   yawOff / pitchOff = scalar degrees accumulated from touch drag.
+ *
+ *   Because offsets are ADDED to the Euler scalars before the quaternion
+ *   conversion, the gyro frame is never distorted. Tilting the phone always
+ *   produces correct camera motion at any yaw offset, including ±180°.
+ *
+ *   • During touch: offsets update in touchmove → camera follows immediately.
+ *   • After touch:  offsets freeze → gyro resumes from exactly that point.
+ *   • No correction quaternion, no leveling RAF, no snap-back possible.
+ *   • Roll (Z in Euler) is always 0 by construction → image never tilts.
  */
 
 import {probeGyroscope} from './device-check'
@@ -23,6 +40,7 @@ const MANIFEST_URL = `${BASE_PATH}manifest.json`
 interface HotspotEntry {
   folder: string
   images: string[]
+  /** Display names matching each image by index. Falls back to image stem. */
   labels?: string[]
 }
 type Manifest = Record<string, HotspotEntry>
@@ -89,7 +107,7 @@ const injectStyles = (() => {
       #v360-prev-btn { left: 14px; }
       #v360-next-btn { right: 14px; }
 
-      /* ── Bottom ── */
+      /* ── Bottom bar ── */
       #v360-bottom {
         position: absolute; bottom: 28px; left: 0; right: 0;
         display: flex; flex-direction: column; align-items: center; gap: 10px;
@@ -103,9 +121,8 @@ const injectStyles = (() => {
         letter-spacing: 0.10em; text-transform: uppercase; color: #4ab8d8;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
         max-width: 74vw;
-        white-space: normal; word-break: break-word;
-        text-align: center; line-height: 1.4em;
-        overflow: hidden;
+        white-space: normal; word-break: break-word; text-align: center;
+        line-height: 1.4em; overflow: hidden;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       }
       #v360-counter { display: flex; gap: 7px; }
@@ -115,10 +132,9 @@ const injectStyles = (() => {
       }
       .v360-dot.active { background: rgba(255,255,255,0.95); }
 
-      /* ── Hint ── */
+      /* ── Explore hint ── */
       #v360-hint {
-        position: absolute;
-        bottom: 110px; left: 50%; transform: translateX(-50%);
+        position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%);
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 10px; font-weight: 300;
         letter-spacing: 0.18em; text-transform: uppercase;
@@ -142,7 +158,7 @@ const injectStyles = (() => {
       }
       @keyframes v360-spin { to { transform: rotate(360deg); } }
 
-      /* ── Gyro badge ── */
+      /* ── Gyro badge (touch-only devices) ── */
       #v360-gyro-badge {
         position: absolute; top: 72px; right: 14px;
         background: rgba(0,0,0,0.45); border-radius: 12px;
@@ -197,7 +213,7 @@ export class Viewer360 {
   private texCache   = new Map<string, any>()
   private texPending = new Map<string, Promise<any>>()
 
-  // ── Per-open state ─────────────────────────────────────────────────────────
+  // ── Navigation state ──────────────────────────────────────────────────────
   private currentHotspot = ''
   private currentFolder  = ''
   private currentImages:  string[] = []
@@ -208,34 +224,32 @@ export class Viewer360 {
   private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
   private _gyroOk = false
-  private _euler:   any = null
-  private _q1:      any = null
-  private _qOrient: any = null
-  private _zee:     any = null
+  private _euler: any = null
+  private _q1:    any = null
+  private _zee:   any = null
 
-  // ── Touch drag ────────────────────────────────────────────────────────────
-  /** Camera quaternion snapshot at touchstart — drag modifies this in-place. */
-  private _touchBaseQuat: any = null
-  private _isTouching   = false
-  private _lastTouchX   = 0
-  private _lastTouchY   = 0
-  /** lon/lat for touch-ONLY mode (no gyro). */
+  // ── View offsets (gyro mode) ───────────────────────────────────────────────
+  /**
+   * Scalar degrees added to the device Euler angles BEFORE quaternion
+   * conversion. Updated by touch drag. Zero = no touch offset applied.
+   *
+   *   camera = Euler(β+_pitchOff, α+_yawOff, −γ, YXZ) × _q1 × _qOrient
+   *
+   * Adding to the scalars (not right-multiplying a correction quaternion)
+   * means gyro directions are ALWAYS correct regardless of offset magnitude.
+   */
+  private _yawOffDeg   = 0   // negative → look right (same sign as lon)
+  private _pitchOffDeg = 0   // positive → look down  (same sign as lat)
+
+  // ── Touch-only mode ────────────────────────────────────────────────────────
   private _drag = { lon: 0, lat: 0 }
+
+  // ── Touch events ──────────────────────────────────────────────────────────
+  private _lastTouchX = 0
+  private _lastTouchY = 0
   private _onTouchStart: ((e: TouchEvent) => void) | null = null
   private _onTouchMove:  ((e: TouchEvent) => void) | null = null
-  private _onTouchEnd:   (() => void)              | null = null
-
-  // ── Re-sync animation ─────────────────────────────────────────────────────
-  /**
-   * After touchend, slerp camera from drag position → live gyro orientation.
-   * Gyro always runs with NO correction offset → inversion is impossible
-   * regardless of how many degrees the user dragged.
-   */
-  private _isSyncing  = false
-  private _syncRaf    = 0
-  private _syncFrom:  any = null
-  private _syncStart  = 0
-  private readonly RESYNC_MS = 450 // ms — ease-out cubic
+  private _onTouchEnd:   ((e: TouchEvent) => void) | null = null
 
   constructor(private readonly THREE: any) {}
 
@@ -251,7 +265,10 @@ export class Viewer360 {
     this.currentImages  = entry?.images  ?? []
     this.currentIdx     = 0
 
-    if (this.currentImages.length === 0) { onClose(); return }
+    if (this.currentImages.length === 0) {
+      onClose()
+      return
+    }
 
     const gyroOk = await this._requestGyroPermission()
 
@@ -280,14 +297,19 @@ export class Viewer360 {
   private async _loadManifest(): Promise<Manifest | null> {
     if (this.manifest)        return this.manifest
     if (this.manifestPromise) return this.manifestPromise
+
     this.manifestPromise = fetch(MANIFEST_URL)
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<Manifest> })
-      .then(m  => { this.manifest = m; return m })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json() as Promise<Manifest>
+      })
+      .then(m => { this.manifest = m; return m })
       .catch(() => null)
+
     return this.manifestPromise
   }
 
-  // ── Label helpers ─────────────────────────────────────────────────────────
+  // ── Labels ────────────────────────────────────────────────────────────────
 
   private _getCurrentLabel(): string {
     const entry  = this.manifest?.[this.currentHotspot]
@@ -304,26 +326,37 @@ export class Viewer360 {
 
   // ── Texture cache ─────────────────────────────────────────────────────────
 
-  private _key(folder: string, filename: string): string { return `${folder}/${filename}` }
+  private _key(folder: string, filename: string): string {
+    return `${folder}/${filename}`
+  }
 
   private _fetchTexture(folder: string, filename: string): Promise<any> {
     const key = this._key(folder, filename)
+
     if (this.texCache.has(key))   return Promise.resolve(this.texCache.get(key))
     if (this.texPending.has(key)) return this.texPending.get(key)!
 
     const promise = new Promise<any>(resolve => {
       if (!this.texLoader) { resolve(null); return }
+
       this.texLoader.load(
         `${BASE_PATH}${folder}/${filename}${IMAGE_EXT}`,
         (tex: any) => {
           if (!this.texLoader) { tex.dispose(); resolve(null); return }
           tex.colorSpace = this.THREE.SRGBColorSpace ?? this.THREE.sRGBEncoding
-          this.texCache.set(key, tex); this.texPending.delete(key); resolve(tex)
+          this.texCache.set(key, tex)
+          this.texPending.delete(key)
+          resolve(tex)
         },
         undefined,
-        () => { this.texCache.set(key, null); this.texPending.delete(key); resolve(null) },
+        () => {
+          this.texCache.set(key, null)
+          this.texPending.delete(key)
+          resolve(null)
+        },
       )
     })
+
     this.texPending.set(key, promise)
     return promise
   }
@@ -335,7 +368,10 @@ export class Viewer360 {
         .map(i => this._key(folder, this.currentImages[i])),
     )
     for (const [key, tex] of this.texCache) {
-      if (!keep.has(key) && tex) { tex.dispose(); this.texCache.delete(key) }
+      if (!keep.has(key) && tex) {
+        tex.dispose()
+        this.texCache.delete(key)
+      }
     }
   }
 
@@ -345,7 +381,7 @@ export class Viewer360 {
     const { currentFolder: folder, currentImages: imgs } = this
     if (newIdx < 0 || newIdx >= imgs.length) return
 
-    // Clear immediately → black + spinner while loading
+    // Black immediately while next image loads
     this._applySphereTexture(null)
     this._showLoading()
 
@@ -353,9 +389,11 @@ export class Viewer360 {
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
-    this._drag.lon = 0
-    this._drag.lat = 0
-    this._cancelResync()
+    // Reset all look-direction state for the new image
+    this._yawOffDeg   = 0
+    this._pitchOffDeg = 0
+    this._drag.lon    = 0
+    this._drag.lat    = 0
 
     this._hideLoading()
     this._updateNavButtons()
@@ -364,6 +402,7 @@ export class Viewer360 {
 
     if (newIdx + 1 < imgs.length) void this._fetchTexture(folder, imgs[newIdx + 1])
     if (newIdx - 1 >= 0)          void this._fetchTexture(folder, imgs[newIdx - 1])
+
     setTimeout(() => this._evictOutside(folder, newIdx), 600)
   }
 
@@ -376,14 +415,18 @@ export class Viewer360 {
 
   // ── UI ────────────────────────────────────────────────────────────────────
 
-  private _buildOverlay(hotspotName: string, gyroOk: boolean, onClose: () => void): void {
+  private _buildOverlay(
+    hotspotName: string, gyroOk: boolean, onClose: () => void,
+  ): void {
     const count    = this.currentImages.length
     const hintText = gyroOk ? 'Move phone · drag to explore' : 'Drag to explore'
-    const div      = document.createElement('div')
+
+    const div = document.createElement('div')
     div.id = 'v360-overlay'
     div.innerHTML = `
       <canvas id="v360-canvas"></canvas>
       <div id="v360-loading"><div class="v360-spinner"></div></div>
+
       <div id="v360-topbar">
         <button id="v360-close-360" aria-label="Close 360">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -394,7 +437,9 @@ export class Viewer360 {
           </svg>
         </button>
       </div>
+
       ${!gyroOk ? `<div id="v360-gyro-badge">Touch mode</div>` : ''}
+
       ${count > 1 ? `
         <button class="v360-nav-btn v360-nav-hidden" id="v360-prev-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
@@ -413,7 +458,9 @@ export class Viewer360 {
           </svg>
         </button>
       ` : ''}
+
       <span id="v360-hint">${hintText}</span>
+
       <div id="v360-bottom">
         <span id="v360-title"></span>
         ${count > 1 ? `
@@ -425,13 +472,21 @@ export class Viewer360 {
         ` : ''}
       </div>
     `
+
     document.body.appendChild(div)
     this.overlay = div
+
     div.querySelector('#v360-close-360')!.addEventListener('click', () => this._close(onClose))
+
     if (count > 1) {
-      div.querySelector('#v360-prev-btn')!.addEventListener('click', async () => this._navigateTo(this.currentIdx - 1))
-      div.querySelector('#v360-next-btn')!.addEventListener('click', async () => this._navigateTo(this.currentIdx + 1))
+      div.querySelector('#v360-prev-btn')!.addEventListener('click', async () => {
+        await this._navigateTo(this.currentIdx - 1)
+      })
+      div.querySelector('#v360-next-btn')!.addEventListener('click', async () => {
+        await this._navigateTo(this.currentIdx + 1)
+      })
     }
+
     requestAnimationFrame(() => div.classList.add('v360-visible'))
   }
 
@@ -443,21 +498,29 @@ export class Viewer360 {
   }
 
   private _updateDots(): void {
-    this.overlay?.querySelectorAll('.v360-dot')
-      .forEach((d, i) => d.classList.toggle('active', i === this.currentIdx))
+    const dots = this.overlay?.querySelectorAll('.v360-dot')
+    if (!dots) return
+    dots.forEach((d, i) => d.classList.toggle('active', i === this.currentIdx))
   }
 
-  private _showLoading(): void  { this.overlay?.querySelector('#v360-loading')?.classList.remove('v360-hidden') }
-  private _hideLoading(): void  { this.overlay?.querySelector('#v360-loading')?.classList.add('v360-hidden') }
+  private _showLoading(): void {
+    this.overlay?.querySelector('#v360-loading')?.classList.remove('v360-hidden')
+  }
+
+  private _hideLoading(): void {
+    this.overlay?.querySelector('#v360-loading')?.classList.add('v360-hidden')
+  }
+
   private _hideHintAfterDelay(): void {
-    setTimeout(() => this.overlay?.querySelector('#v360-hint')?.classList.add('v360-hidden'), 3500)
+    setTimeout(() => {
+      this.overlay?.querySelector('#v360-hint')?.classList.add('v360-hidden')
+    }, 3500)
   }
 
   // ── Close ─────────────────────────────────────────────────────────────────
 
   private _close(onClose: () => void): void {
     cancelAnimationFrame(this.rafId)
-    this._cancelResync()
     this._stopGyro()
     this._stopTouchDrag()
     this._stopResizeHandler()
@@ -470,32 +533,42 @@ export class Viewer360 {
     onClose()
   }
 
-  // ── Three.js ──────────────────────────────────────────────────────────────
+  // ── Three.js setup ────────────────────────────────────────────────────────
 
   private _initRenderer(): void {
     const { THREE } = this
     const canvas = document.getElementById('v360-canvas') as HTMLCanvasElement
+
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
     this.renderer.setSize(window.innerWidth, window.innerHeight)
+
     this.scene  = new THREE.Scene()
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
+
     const geo = new THREE.SphereGeometry(500, 60, 40)
     geo.scale(-1, 1, 1)
     this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x1a2a3a }))
     this.scene.add(this.sphere)
+
     this.texLoader = new THREE.TextureLoader()
-    this._euler   = new THREE.Euler()
-    this._q1      = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
-    this._qOrient = new THREE.Quaternion()
-    this._zee     = new THREE.Vector3(0, 0, 1)
+    this._euler    = new THREE.Euler()
+    // Device-to-camera frame correction: −90° around X axis.
+    this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
+    this._zee      = new THREE.Vector3(0, 0, 1)
   }
 
   private _fullDispose(): void {
-    for (const tex of this.texCache.values()) if (tex) tex.dispose()
-    this.texCache.clear(); this.texPending.clear()
+    for (const tex of this.texCache.values()) {
+      if (tex) tex.dispose()
+    }
+    this.texCache.clear()
+    this.texPending.clear()
+
     if (this.sphere) {
-      this.sphere.geometry.dispose(); this.sphere.material.dispose(); this.sphere = null
+      this.sphere.geometry.dispose()
+      this.sphere.material.dispose()
+      this.sphere = null
     }
     this.renderer?.dispose()
     this.renderer = this.scene = this.camera = this.texLoader = null
@@ -525,8 +598,10 @@ export class Viewer360 {
   private async _requestGyroPermission(): Promise<boolean> {
     const DOE = (DeviceOrientationEvent as any)
     if (typeof DOE?.requestPermission === 'function') {
-      try { if (await DOE.requestPermission() !== 'granted') return false }
-      catch { return false }
+      try {
+        const result = await DOE.requestPermission()
+        if (result !== 'granted') return false
+      } catch { return false }
     }
     return probeGyroscope(1200)
   }
@@ -535,7 +610,9 @@ export class Viewer360 {
     this._gyroOk = true
     this._gyroHandler = (e: DeviceOrientationEvent) => {
       if (e.alpha === null) return
-      this._alpha = e.alpha; this._beta = e.beta ?? 90; this._gamma = e.gamma ?? 0
+      this._alpha = e.alpha
+      this._beta  = e.beta  ?? 90
+      this._gamma = e.gamma ?? 0
     }
     window.addEventListener('deviceorientation', this._gyroHandler)
   }
@@ -548,145 +625,87 @@ export class Viewer360 {
     this._gyroOk = false
   }
 
-  /** Returns the raw gyro quaternion for the current device orientation. */
-  private _computeGyroQuat(): any {
+  // ── Camera quaternion (gyro mode) ─────────────────────────────────────────
+
+  /**
+   * Computes the camera quaternion for gyro mode.
+   *
+   * _yawOffDeg / _pitchOffDeg are added directly to the device Euler angles
+   * before conversion. This is fundamentally different from right-multiplying
+   * a correction quaternion:
+   *
+   *   Q_correction approach:  camera = Euler(β,α,γ) × R_touch
+   *     → R_touch conjugates gyro deltas → inversion at 180° offset
+   *
+   *   Additive approach (v6): camera = Euler(β+off, α+off, γ) × _q1 × orient
+   *     → gyro deltas always produce correct motion at ANY offset magnitude
+   */
+  private _gyroQuat(): any {
     const { THREE } = this
-    const alpha  = THREE.MathUtils.degToRad(this._alpha)
-    const beta   = THREE.MathUtils.degToRad(this._beta)
+    const alpha  = THREE.MathUtils.degToRad(this._alpha + this._yawOffDeg)
+    const beta   = THREE.MathUtils.degToRad(
+      Math.max(-89, Math.min(89, this._beta + this._pitchOffDeg)),
+    )
     const gamma  = THREE.MathUtils.degToRad(this._gamma)
     const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
+
     this._euler.set(beta, alpha, -gamma, 'YXZ')
     const q = new THREE.Quaternion().setFromEuler(this._euler)
     q.multiply(this._q1)
-    this._qOrient.setFromAxisAngle(this._zee, -orient)
-    q.multiply(this._qOrient)
+    const qOrient = new THREE.Quaternion().setFromAxisAngle(this._zee, -orient)
+    q.multiply(qOrient)
     return q
-  }
-
-  // ── Re-sync animation ─────────────────────────────────────────────────────
-  //
-  // Design rationale:
-  //   The previous approach baked _gyroCorrection = gyroQuat⁻¹ × dragQuat.
-  //   After a 180° drag, this correction flips the gyro frame — looking up
-  //   physically moves the view down. Mathematically unavoidable with that
-  //   approach.
-  //
-  //   The fix: gyro NEVER has a correction. Touch is a temporary override.
-  //   On touchend, we animate back to the gyro's natural frame. The gyro
-  //   is always reading physical device orientation, no correction applied.
-
-  private _cancelResync(): void {
-    cancelAnimationFrame(this._syncRaf)
-    this._isSyncing = false
-    this._syncFrom  = null
-  }
-
-  /**
-   * Smoothly re-syncs the camera from `fromQuat` (where user released finger)
-   * to the live gyro orientation using ease-out cubic over RESYNC_MS ms.
-   * Target updates every frame so it chases the gyro even while animating.
-   */
-  private _startResync(fromQuat: any): void {
-    this._cancelResync()
-    this._syncFrom  = fromQuat.clone()
-    this._syncStart = performance.now()
-    this._isSyncing = true
-
-    const step = () => {
-      if (!this.renderer || !this._isSyncing) return
-      const elapsed = performance.now() - this._syncStart
-      const raw     = Math.min(elapsed / this.RESYNC_MS, 1)
-      const eased   = 1 - Math.pow(1 - raw, 3) // ease-out cubic
-
-      // Chase the live gyro target — if the user moves the phone during the
-      // re-sync, the animation smoothly follows rather than jumping.
-      this.camera.quaternion.slerpQuaternions(
-        this._syncFrom, this._computeGyroQuat(), eased,
-      )
-
-      if (raw < 1) {
-        this._syncRaf = requestAnimationFrame(step)
-      } else {
-        this._isSyncing = false
-        // Ensure final frame is exactly on gyro
-        this.camera.quaternion.copy(this._computeGyroQuat())
-      }
-    }
-    this._syncRaf = requestAnimationFrame(step)
   }
 
   // ── Touch drag ────────────────────────────────────────────────────────────
   //
   // GYRO MODE:
-  //   touchstart → snapshot camera.quaternion; gyro paused.
-  //   touchmove  → incremental yaw (world Y) + pitch (levelled right vector).
-  //                Roll cannot accumulate — right vector is projected to XZ.
-  //   touchend   → _startResync() back to gyro. No correction offset baked.
+  //   touchmove → increment _yawOffDeg / _pitchOffDeg by the pixel delta.
+  //               _gyroQuat() reads these on every render frame.
+  //   touchend  → no action needed. Offsets stay frozen; gyro resumes
+  //               immediately from exactly where the finger left off.
   //
-  // TOUCH-ONLY: classic lon/lat spherical, vertical ±89°.
+  // TOUCH-ONLY MODE:
+  //   Classic lon/lat → spherical lookAt. ±89° vertical range.
 
   private _startTouchDrag(): void {
-    this._drag.lon = 0; this._drag.lat = 0
-    this._isTouching = false
+    this._yawOffDeg   = 0
+    this._pitchOffDeg = 0
+    this._drag.lon    = 0
+    this._drag.lat    = 0
 
     this._onTouchStart = (e: TouchEvent) => {
       if (e.touches.length !== 1) return
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
-
-      this._cancelResync() // user takes control mid-animation
-      this._isTouching = true
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
-
-      if (this._gyroOk) {
-        // Snapshot the exact frame the user is looking at
-        this._touchBaseQuat = this.camera.quaternion.clone()
-      }
     }
 
     this._onTouchMove = (e: TouchEvent) => {
-      if (!this._isTouching || e.touches.length !== 1) return
+      // Ignore multi-touch (e.g. pinch) — only single finger pans
+      if (e.touches.length !== 1) return
 
       const dx = e.touches[0].clientX - this._lastTouchX
       const dy = e.touches[0].clientY - this._lastTouchY
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
 
-      if (this._gyroOk && this._touchBaseQuat) {
-        const { THREE } = this
-        const SENS = 0.003 // rad/px
-
-        // Yaw: always around world Y — never introduces roll
-        const yawQ = new THREE.Quaternion().setFromAxisAngle(
-          new THREE.Vector3(0, 1, 0), dx * SENS,
-        )
-
-        // Pitch: around camera-right projected onto XZ (levelled right).
-        // This prevents roll accumulation even when the base quat is tilted.
-        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
-        camRight.y = 0
-        if (camRight.lengthSq() < 0.0001) camRight.set(1, 0, 0)
-        camRight.normalize()
-        const pitchQ = new THREE.Quaternion().setFromAxisAngle(camRight, dy * SENS)
-
-        this._touchBaseQuat.premultiply(yawQ).premultiply(pitchQ)
-        this.camera.quaternion.copy(this._touchBaseQuat)
-      } else if (!this._gyroOk) {
+      if (this._gyroOk) {
+        // Add to Euler angle offsets. Same sign convention as touch-only lon/lat
+        // so the pan feels identical in both modes.
+        this._yawOffDeg  -= dx * 0.25
+        this._pitchOffDeg = Math.max(-89, Math.min(89, this._pitchOffDeg + dy * 0.15))
+      } else {
         this._drag.lon -= dx * 0.25
         this._drag.lat += dy * 0.15
         this._drag.lat  = Math.max(-89, Math.min(89, this._drag.lat))
       }
     }
 
-    this._onTouchEnd = () => {
-      if (!this._isTouching) return
-      this._isTouching = false
-      if (this._gyroOk) {
-        // Animate back to live gyro — no correction baked, no inversion possible
-        this._startResync(this.camera.quaternion.clone())
-      }
-    }
+    // touchend: nothing to do in gyro mode.
+    // Gyro resumes immediately using the frozen offsets — no snap, no race.
+    this._onTouchEnd = (_e: TouchEvent) => {}
 
     const canvas = document.getElementById('v360-canvas')!
     canvas.addEventListener('touchstart',  this._onTouchStart, { passive: true })
@@ -705,8 +724,6 @@ export class Viewer360 {
       canvas.removeEventListener('touchcancel', this._onTouchEnd)
     }
     this._onTouchStart = this._onTouchMove = this._onTouchEnd = null
-    this._isTouching = false
-    this._cancelResync()
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
@@ -718,13 +735,13 @@ export class Viewer360 {
       if (!this.renderer) return
       this.rafId = requestAnimationFrame(tick)
 
-      if (this._isSyncing) {
-        // Re-sync RAF drives camera — just render what it set
-      } else if (this._gyroOk && !this._isTouching) {
-        // Pure gyro, no correction offset
-        this.camera.quaternion.copy(this._computeGyroQuat())
-      } else if (!this._gyroOk) {
-        // Touch-only: lookAt from lon/lat, vertical ±89°
+      if (this._gyroOk) {
+        // Single path for both "touching" and "not touching".
+        // During touch: _yawOffDeg / _pitchOffDeg update in touchmove.
+        // After touch:  same values, frozen → gyro resumes from that point.
+        this.camera.quaternion.copy(this._gyroQuat())
+      } else {
+        // Touch-only: spherical lookAt
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(
@@ -733,7 +750,6 @@ export class Viewer360 {
           500 * Math.sin(phi) * Math.sin(theta),
         )
       }
-      // _gyroOk && _isTouching: camera set live in touchmove
 
       this.renderer.render(this.scene, this.camera)
     }
