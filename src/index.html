@@ -5,16 +5,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>terrain-ar</title>
-  <link rel="preload" href="./external/runtime/runtime.js" as="script">
-  <link rel="preload" href="./external/xr/xr.js" as="script">
-  <link rel="preload" href="./external/xr/xr-slam.js" as="script">
 
+  <!-- Preload scripts -->
+  <link crossorigin="anonymous" rel="preload" href="./external/runtime/runtime.js" as="script">
+  <link crossorigin="anonymous" rel="preload" href="./external/xr/xr.js" as="script">
+  <link crossorigin="anonymous" rel="preload" href="./external/xr/xr-slam.js" as="script">
+
+  <!-- 8thWall runtime -->
   <script crossorigin="anonymous" src="./external/runtime/runtime.js"></script>
-  <script crossorigin="anonymous" src="./external/xr/xr.js" async="true" data-preload-chunks="slam"></script>
+
 </head>
 
 <body>
-<script src="bundle.js"></script>
+
+  <!-- Nuestro bundle (registra componentes AFRAME) -->
+  <script src="bundle.js"></script>
+
+  <!-- XR se carga después -->
+  <script
+    crossorigin="anonymous"
+    src="./external/xr/xr.js"
+    data-preload-chunks="slam">
+  </script>
 
 </body>
 

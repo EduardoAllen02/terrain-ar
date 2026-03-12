@@ -83,7 +83,7 @@ ecs.registerComponent({
 
     const boards = new BillboardManager(THREE, {
       baseSize:       0.35,
-      verticalOffset: 0.025,
+      verticalOffset: 0.0,
       debug:          false,
       scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
       onHotspotTap: (name) => {

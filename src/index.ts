@@ -1,12 +1,18 @@
 /**
  * Terrain AR – entry point
- * Registers all ECS components for the 8th Wall scene.
- * Import this once from your bundle entry (e.g. bundle.js via webpack/vite).
  */
 
-// ─── Terrain AR ────────────────────────────────────────────────────────────────
-// The main placement component (dot tower + grey preview + tap to place).
+// ─── Terrain AR Components ─────────────────────────────────────────────
+
+// Main terrain placement component
 import './terrain-ar/terrain-tap-place'
 
-// Note: DotTower and ArUiOverlay are plain TS classes imported by terrain-tap-place.
-// They do not need to be registered here.
+// Otros componentes del sistema AR
+import './terrain-ar/ar-ui-overlay'
+import './terrain-ar/billboard-manager'
+import './terrain-ar/device-check'
+import './terrain-ar/experience-registry'
+import './terrain-ar/gesture-handler'
+import './terrain-ar/viewer-360'
+
+// Si usas utilidades o loaders también podrían importarse aquí
