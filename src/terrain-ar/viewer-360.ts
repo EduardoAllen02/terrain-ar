@@ -14,8 +14,6 @@ const BASE_PATH    = 'assets/360/'
 const IMAGE_EXT    = '.jpg'
 const MANIFEST_URL = `${BASE_PATH}manifest.json`
 
-/** Vertical look limit in degrees from horizon. Applied to gyro pitch. */
-const MAX_PITCH_DEG = 70
 
 interface HotspotEntry {
   folder: string
@@ -582,9 +580,7 @@ export class Viewer360 {
   private _computeGyroQuat(): any {
     const { THREE } = this
     const alpha  = THREE.MathUtils.degToRad(this._alpha)
-    const beta   = THREE.MathUtils.degToRad(
-      Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, this._beta)),
-    )
+    const beta   = THREE.MathUtils.degToRad(this._beta)
     const gamma  = THREE.MathUtils.degToRad(this._gamma)
     const orient = THREE.MathUtils.degToRad(getOrientAngleDeg())
 
