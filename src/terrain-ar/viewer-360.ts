@@ -1,20 +1,23 @@
 /**
- * Viewer360 — v4
+ * Viewer360 — v6
  *
- * Changes vs v3:
- *  • Navigation clears sphere to black immediately before fetching the next
- *    texture — no more "frozen previous frame" while loading.
- *  • Gyro is FROZEN while a finger is on screen. Touch drives the view
- *    exclusively during the drag. On finger lift, gyro resumes from the
- *    device's physical orientation (accumulated touch offset resets to 0).
- *    This matches the UX of YouTube 360 / Google Street View.
- *  • Vertical range extended to ±89° (was ±85°). Users can now look straight
- *    up to the zenith of the equirectangular photo.
- *  • touchcancel handled the same as touchend (gyro reset + active=false).
- *  • Memory strategy confirmed correct:
- *    - Sliding window ±1: max 3 textures in GPU memory at once (~30-60 MB).
- *    - On close: _fullDispose() releases ALL GPU textures immediately.
- *    - Textures that finish loading after close are disposed on arrival.
+ * Base: v4 (fluido, gyro + touchBaseQuat).
+ *
+ * Problema de v4: tras un drag horizontal grande (~180°), el quaternion de
+ * corrección acumulado (_gyroCorrection = gyroQuat⁻¹ × dragQuat) conjuga
+ * los deltas futuros del gyro, invirtiendo los controles.
+ *
+ * Fix (mínimo):
+ *   1. touchstart → _gyroOk = false. El gyro se "apaga" durante el drag.
+ *      El touchBaseQuat maneja la cámara exclusivamente (como en v4).
+ *   2. touchend  → leveling animado (igual que v4), luego al terminar:
+ *      _gyroCorrection = identity, _gyroOk = true.
+ *      El gyro arranca LIMPIO. camera = gyroQuat × identity = gyroQuat.
+ *      Sin correction quaternion → sin conjugación → sin inversión posible.
+ *   3. Snap tras restart: en la práctica el teléfono se mueve físicamente
+ *      ~igual que el drag, por lo que gyroQuat ≈ posición del dedo. OK.
+ *   4. Límite vertical ±70° en touch (gyro y touch-only) para que el snap
+ *      horizontal sea imperceptible y el usuario no quede mirando al cénit.
  */
 
 import {probeGyroscope} from './device-check'
@@ -24,6 +27,8 @@ import {probeGyroscope} from './device-check'
 const BASE_PATH    = 'assets/360/'
 const IMAGE_EXT    = '.jpg'
 const MANIFEST_URL = `${BASE_PATH}manifest.json`
+
+const MAX_PITCH_DEG = 70  // ±70° from horizon — limits touch AND gyro pitch
 
 interface HotspotEntry {
   folder: string
@@ -109,7 +114,6 @@ const injectStyles = (() => {
         letter-spacing: 0.10em; text-transform: uppercase; color: #4ab8d8;
         box-shadow: 0 2px 12px rgba(0,0,0,0.18);
         max-width: 74vw;
-        /* Allow up to 2 lines instead of truncating */
         white-space: normal;
         word-break: break-word;
         text-align: center;
@@ -218,25 +222,24 @@ export class Viewer360 {
   private _gyroHandler:   ((e: DeviceOrientationEvent) => void) | null = null
   private _resizeHandler: (() => void) | null = null
   private _alpha = 0; private _beta = 90; private _gamma = 0
-  private _gyroOk = false
+  /**
+   * Whether the gyro is currently ACTIVE (driving the render loop).
+   * Set to false on touchstart, restored to true after leveling completes.
+   */
+  private _gyroOk   = false
+  /**
+   * Permanent flag: true if this device has gyro and it was initialized.
+   * Never reset to false — used to distinguish "gyro paused during touch"
+   * from "device has no gyro at all".
+   */
+  private _hasGyro  = false
   private _euler:         any = null
   private _q1:            any = null
   private _qOrient:       any = null
   private _zee:           any = null
-  /**
-   * Rotational offset accumulated from touch sessions.
-   * Applied on top of the raw gyro quaternion so that
-   * the view stays at point B after the user lifts their finger.
-   * Initialised to identity in _initRenderer().
-   */
   private _gyroCorrection: any = null
 
   // ── Touch drag ────────────────────────────────────────────────────────────
-  /**
-   * Quaternion captured at the moment the finger touches the screen.
-   * Touch drag modifies this quaternion in-place and drives the camera
-   * directly while the finger is down (gyro is ignored).
-   */
   private _touchBaseQuat: any = null
   private _isTouching = false
   private _lastTouchX = 0
@@ -247,13 +250,12 @@ export class Viewer360 {
   private _onTouchEnd:   (() => void)              | null = null
 
   // ── Horizon leveling animation ────────────────────────────────────────────
-  /** True while the post-touch leveling slerp is running. */
   private _isLeveling    = false
   private _levelingRaf   = 0
   private _levelingFrom: any = null
   private _levelingTo:   any = null
   private _levelingStart = 0
-  private readonly _levelingDuration = 380 // ms — ease-out cubic
+  private readonly _levelingDuration = 380
 
   constructor(private readonly THREE: any) {}
 
@@ -280,11 +282,7 @@ export class Viewer360 {
     this._initRenderer()
     this._startResizeHandler()
     if (gyroOk) this._startGyro()
-
-    // Always enable touch drag — works as additive offset in gyro mode
-    // and as standalone direction in touch-only mode.
     this._startTouchDrag()
-
     this._startLoop()
 
     const tex = await this._fetchTexture(this.currentFolder, this.currentImages[0])
@@ -319,17 +317,14 @@ export class Viewer360 {
 
   // ── Label helpers ─────────────────────────────────────────────────────────
 
-  /** Returns the display label for the current image index. */
   private _getCurrentLabel(): string {
     const entry  = this.manifest?.[this.currentHotspot]
     const labels = entry?.labels
     if (labels && labels[this.currentIdx]) return labels[this.currentIdx]
-    // Fallback: image stem without leading "NN. " prefix
     const stem = this.currentImages[this.currentIdx] ?? this.currentHotspot
     return stem.replace(/^\d+\.\s*/, '')
   }
 
-  /** Updates the bottom title element with the current label. */
   private _updateTitle(): void {
     const el = this.overlay?.querySelector<HTMLElement>('#v360-title')
     if (el) el.textContent = this._getCurrentLabel()
@@ -392,7 +387,6 @@ export class Viewer360 {
     const { currentFolder: folder, currentImages: imgs } = this
     if (newIdx < 0 || newIdx >= imgs.length) return
 
-    // Clear current image immediately → black background while loading
     this._applySphereTexture(null)
     this._showLoading()
 
@@ -400,10 +394,9 @@ export class Viewer360 {
     this._applySphereTexture(tex)
     this.currentIdx = newIdx
 
-    // Reset look direction and gyro correction for the new image
     this._drag.lon = 0
     this._drag.lat = 0
-    if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1) // identity
+    if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1)
     this._cancelLeveling()
 
     this._hideLoading()
@@ -411,12 +404,9 @@ export class Viewer360 {
     this._updateDots()
     this._updateTitle()
 
-    // Prefetch neighbours in background
     if (newIdx + 1 < imgs.length) void this._fetchTexture(folder, imgs[newIdx + 1])
     if (newIdx - 1 >= 0)          void this._fetchTexture(folder, imgs[newIdx - 1])
 
-    // Evict textures outside the ±1 window after a short delay so the GPU
-    // has finished with anything still in the pipeline.
     setTimeout(() => this._evictOutside(folder, newIdx), 600)
   }
 
@@ -441,7 +431,6 @@ export class Viewer360 {
       <canvas id="v360-canvas"></canvas>
       <div id="v360-loading"><div class="v360-spinner"></div></div>
 
-      <!-- Top bar: single X to close 360 and return to AR -->
       <div id="v360-topbar">
         <button id="v360-close-360" aria-label="Close 360">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -476,7 +465,6 @@ export class Viewer360 {
 
       <span id="v360-hint">${hintText}</span>
 
-      <!-- Bottom: place name (from labels) + progress dots -->
       <div id="v360-bottom">
         <span id="v360-title"></span>
         ${count > 1 ? `
@@ -573,7 +561,6 @@ export class Viewer360 {
     this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
     this._qOrient  = new THREE.Quaternion()
     this._zee      = new THREE.Vector3(0, 0, 1)
-    // Identity correction — no offset until the user first drags
     this._gyroCorrection = new THREE.Quaternion()
   }
 
@@ -626,7 +613,8 @@ export class Viewer360 {
   }
 
   private _startGyro(): void {
-    this._gyroOk = true
+    this._gyroOk  = true
+    this._hasGyro = true   // permanent — never reset to false
     this._gyroHandler = (e: DeviceOrientationEvent) => {
       if (e.alpha === null) return
       this._alpha = e.alpha
@@ -641,27 +629,12 @@ export class Viewer360 {
       window.removeEventListener('deviceorientation', this._gyroHandler)
       this._gyroHandler = null
     }
-    this._gyroOk = false
+    this._gyroOk  = false
+    this._hasGyro = false
   }
 
-  // ── Touch drag ────────────────────────────────────────────────────────────
-  // GYRO MODE — seamless handoff via correction quaternion:
-  //   touchstart → capture camera.quaternion as _touchBaseQuat; gyro ignored.
-  //   touchmove  → apply incremental yaw/pitch to _touchBaseQuat; camera
-  //                follows the finger from exactly point A — no jump.
-  //   touchend   → animate roll back to zero (horizon leveling, ~380ms),
-  //                then bake correction = gyroQuat⁻¹ × leveledCameraQuat.
-  //                Gyro resumes at point B, perfectly upright.
-  //
-  // TOUCH-ONLY MODE — classic lon/lat spherical, vertical ±89°.
-  // No roll possible in this mode (lookAt always uses world-up).
+  // ── Leveling ──────────────────────────────────────────────────────────────
 
-  /**
-   * Returns a copy of `q` with roll removed — same yaw and pitch,
-   * but the camera's up vector aligned to world up.
-   * If looking straight up/down (|fwd.y| > 0.999), returns `q` unchanged
-   * to avoid gimbal-lock artifacts.
-   */
   private _deRoll(q: any): any {
     const { THREE } = this
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q)
@@ -679,20 +652,23 @@ export class Viewer360 {
   }
 
   /**
-   * Animates the camera from `fromQuat` to the de-rolled version of `fromQuat`
-   * using an ease-out cubic over `_levelingDuration` ms.
-   * When done, rebakes `_gyroCorrection` from the leveled position so gyro
-   * resumes exactly at the leveled viewpoint.
+   * Animates from fromQuat to its de-rolled version (ease-out cubic, 380ms).
+   *
+   * KEY CHANGE vs v4: on completion, instead of baking a correction quaternion
+   * (which caused inversion after large drags), we:
+   *   1. Reset _gyroCorrection to identity.
+   *   2. Set _gyroOk = true.
+   * The gyro restarts completely clean. camera = gyroQuat × identity = gyroQuat.
+   * No correction → no possible conjugation → no inversion at any drag angle.
    */
   private _startLevelingAnimation(fromQuat: any): void {
     this._cancelLeveling()
     const toQuat = this._deRoll(fromQuat)
 
-    // Skip animation if already level (quaternion dot product ≈ 1)
+    // Already level — restart gyro immediately
     if (Math.abs(fromQuat.dot(toQuat)) > 0.9998) {
-      // Still bake correction so gyro is accurate
-      const gyroQ = this._computeGyroQuat()
-      this._gyroCorrection = gyroQ.clone().invert().multiply(fromQuat.clone())
+      this._gyroCorrection.set(0, 0, 0, 1)
+      this._gyroOk = true
       return
     }
 
@@ -705,7 +681,7 @@ export class Viewer360 {
       if (!this.renderer || !this._isLeveling) return
       const elapsed = performance.now() - this._levelingStart
       const raw     = Math.min(elapsed / this._levelingDuration, 1)
-      const eased   = 1 - Math.pow(1 - raw, 3) // ease-out cubic
+      const eased   = 1 - Math.pow(1 - raw, 3)
 
       this.camera.quaternion.slerpQuaternions(
         this._levelingFrom, this._levelingTo, eased,
@@ -714,16 +690,16 @@ export class Viewer360 {
       if (raw < 1) {
         this._levelingRaf = requestAnimationFrame(step)
       } else {
-        // Animation complete — bake leveled position into gyro correction
+        // Leveling complete — restart gyro clean (identity correction)
         this._isLeveling = false
-        const gyroQ = this._computeGyroQuat()
-        this._gyroCorrection = gyroQ.clone().invert().multiply(this._levelingTo.clone())
+        this._gyroCorrection.set(0, 0, 0, 1)
+        this._gyroOk = true
       }
     }
     this._levelingRaf = requestAnimationFrame(step)
   }
 
-  /** Returns the raw gyro quaternion for the current device orientation. */
+  /** Raw gyro quaternion for current device orientation. */
   private _computeGyroQuat(): any {
     const { THREE } = this
     const alpha  = THREE.MathUtils.degToRad(this._alpha)
@@ -738,6 +714,19 @@ export class Viewer360 {
     return q
   }
 
+  // ── Touch drag ────────────────────────────────────────────────────────────
+  //
+  // GYRO MODE:
+  //   touchstart → _gyroOk = false (gyro fully disabled for duration of touch).
+  //                Capture camera.quaternion as _touchBaseQuat.
+  //   touchmove  → apply yaw/pitch deltas to _touchBaseQuat, with pitch
+  //                clamped to ±MAX_PITCH_DEG (prevents looking near zenith).
+  //   touchend   → leveling animation (380ms ease-out to roll=0).
+  //                On completion: _gyroCorrection = identity, _gyroOk = true.
+  //                Gyro restarts CLEAN — no inversion possible at any drag angle.
+  //
+  // TOUCH-ONLY MODE — classic lon/lat spherical, vertical ±MAX_PITCH_DEG.
+
   private _startTouchDrag(): void {
     this._drag.lon = 0
     this._drag.lat = 0
@@ -748,14 +737,21 @@ export class Viewer360 {
       const target = e.target as HTMLElement
       if (target.closest('.v360-nav-btn') || target.closest('#v360-close-360')) return
 
-      // Cancel any in-progress leveling — user is taking control again
+      // Cancel any in-progress leveling
       this._cancelLeveling()
+
+      // Disable gyro for the duration of the touch.
+      // _gyroCorrection is cleared so gyro restarts clean on touchend.
+      this._gyroOk = false
+      if (this._gyroCorrection) this._gyroCorrection.set(0, 0, 0, 1)
 
       this._isTouching = true
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
 
-      if (this._gyroOk) {
+      // Always capture base quaternion (used in both gyro and touch-only paths
+      // when _hasGyro, not used in pure touch-only lat/lon path)
+      if (this._hasGyro) {
         this._touchBaseQuat = this.camera.quaternion.clone()
       }
     }
@@ -768,28 +764,41 @@ export class Viewer360 {
       this._lastTouchX = e.touches[0].clientX
       this._lastTouchY = e.touches[0].clientY
 
-      if (this._gyroOk && this._touchBaseQuat) {
+      if (this._hasGyro && this._touchBaseQuat) {
+        // Gyro device — use quaternion-based drag (preserves roll=0 during drag)
         const { THREE } = this
         const SENS = 0.003
+        const MAX_PITCH_RAD = THREE.MathUtils.degToRad(MAX_PITCH_DEG)
 
+        // Yaw: always applied (no vertical limit on horizontal panning)
         const yawQ = new THREE.Quaternion().setFromAxisAngle(
           new THREE.Vector3(0, 1, 0), dx * SENS,
         )
-        // Use the LEVEL right vector (camera right projected onto the XZ plane)
-        // instead of the raw camera right — this prevents roll accumulation
-        // when the device is already tilted.
+        this._touchBaseQuat.premultiply(yawQ)
+
+        // Pitch: apply only if result is within ±MAX_PITCH_DEG from horizon
         const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this._touchBaseQuat)
         camRight.y = 0
         if (camRight.lengthSq() < 0.001) camRight.set(1, 0, 0)
         camRight.normalize()
         const pitchQ = new THREE.Quaternion().setFromAxisAngle(camRight, dy * SENS)
 
-        this._touchBaseQuat.premultiply(yawQ).premultiply(pitchQ)
+        // Test result before committing
+        const testQuat = this._touchBaseQuat.clone().premultiply(pitchQ)
+        const fwd      = new THREE.Vector3(0, 0, -1).applyQuaternion(testQuat)
+        // fwd.y = sin(pitchAngle): positive = looking up, negative = looking down
+        const pitchAngle = Math.asin(Math.max(-1, Math.min(1, fwd.y)))
+        if (Math.abs(pitchAngle) < MAX_PITCH_RAD) {
+          this._touchBaseQuat.premultiply(pitchQ)
+        }
+
         this.camera.quaternion.copy(this._touchBaseQuat)
-      } else if (!this._gyroOk) {
+
+      } else if (!this._hasGyro) {
+        // Touch-only (no gyro on device)
         this._drag.lon -= dx * 0.25
         this._drag.lat += dy * 0.15
-        this._drag.lat  = Math.max(-89, Math.min(89, this._drag.lat))
+        this._drag.lat  = Math.max(-MAX_PITCH_DEG, Math.min(MAX_PITCH_DEG, this._drag.lat))
       }
     }
 
@@ -797,10 +806,11 @@ export class Viewer360 {
       if (!this._isTouching) return
       this._isTouching = false
 
-      if (this._gyroOk) {
-        // Animate roll back to zero, then bake the leveled correction.
+      // _hasGyro: leveling animation → gyro restarts clean on completion
+      if (this._hasGyro) {
         this._startLevelingAnimation(this.camera.quaternion.clone())
       }
+      // touch-only: no leveling needed, _drag.lon/lat hold the position
     }
 
     const canvas = document.getElementById('v360-canvas')!
@@ -834,12 +844,13 @@ export class Viewer360 {
       this.rafId = requestAnimationFrame(tick)
 
       if (this._isLeveling) {
-        // Leveling animation is running its own RAF — just render what it set.
-      } else if (this._gyroOk && !this._isTouching) {
-        // Gyro drives camera; correction preserves the user's last drag position.
+        // Leveling animation runs its own RAF — render only
+      } else if (this._gyroOk) {
+        // Gyro active (not currently touching — _gyroOk is false during touch)
+        // _gyroCorrection is identity here (reset on touchstart / leveling end)
         this.camera.quaternion.copy(this._computeGyroQuat()).multiply(this._gyroCorrection)
-      } else if (!this._gyroOk) {
-        // Touch-only: lookAt from lon/lat
+      } else if (!this._hasGyro) {
+        // Pure touch-only device: lookAt from lon/lat
         const phi   = THREE.MathUtils.degToRad(90 - this._drag.lat)
         const theta = THREE.MathUtils.degToRad(this._drag.lon)
         this.camera.lookAt(
@@ -848,7 +859,11 @@ export class Viewer360 {
           500 * Math.sin(phi) * Math.sin(theta),
         )
       }
-      // _gyroOk && _isTouching: camera already updated live in touchmove.
+      // _hasGyro && !_gyroOk && _isTouching:
+      //   camera was updated live in touchmove (_touchBaseQuat path). No-op here.
+      // _hasGyro && !_gyroOk && !_isTouching && !_isLeveling:
+      //   transient state during touchend before _startLevelingAnimation runs.
+      //   Camera holds last touchmove position. Fine — next frame leveling starts.
 
       this.renderer.render(this.scene, this.camera)
     }
