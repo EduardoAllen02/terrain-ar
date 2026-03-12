@@ -1,51 +1,142 @@
-### Your Exported Project
-This zip contains your project source code, assets, image targets, and configuration needed to build and publish your 8th Wall project. It does not connect to any 8th Wall services, so will work even after the 8th Wall servers are shut down.
+# README 
+## Deployment
 
-### Setup
-If node/npm are not installed, install using https://github.com/nvm-sh/nvm or https://nodejs.org/en/download.
+The application is distributed as a pre-built bundle.
 
-Run `npm install` in this folder.
+Only the `/dist` directory needs to be deployed to the web server.
 
-### Development
-Run `npm run serve` to run the development server.
+Steps:
 
-#### Testing on Mobile
-To test your project on mobile devices, especially for AR experiences that require camera access, you'll need to serve your development server over HTTPS. We recommend using [ngrok](https://ngrok.com/) to create a secure tunnel to your local server. After setting up ngrok, add the following configuration to `config/webpack.config.js` under the `devServer` section:
+1. Build the project locally.
+2. Upload the contents of the `/dist` folder to the web server.
+3. Serve the files from a standard static web server.
 
-```javascript
-devServer: {
-  // ... existing config
-  allowedHosts: ['.ngrok-free.dev']
-}
-```
+No server-side runtime is required.  
+Any static hosting (NGINX, Apache, CDN, or cloud storage hosting) will work.
 
-### Publishing
-Run `npm run build` to generate a production build. The resulting build will be in `dist/`. You can host this bundle on any web server you want.
+## Cosa fa ogni file
 
-### Project Overview
-- `src/`: Contains all your original project code and assets.
-    - Your scene graph is in `src/.expanse.json`. If you are on Mac and don't see this, press `Cmd + Shift + .` to show hidden files.
-    - References to asset bundles will need to be updated. Asset bundles are now plain folders. For example,
-      - GLTF bundles need to be updated to the `.gltf` file in the folder, i.e., if your model is at `assets/mymodel.gltf/`, update your code to reference `assets/mymodel.gltf/mymodel_file.gltf`.
-      - Custom `.font8` fonts need to be updated to the `.font8` file in the folder, i.e., if your font is at `assets/myfont.font8/`, update your code to reference `assets/myfont.font8/myfont_file.font8`.
-- `image-targets/`: Contains your project's image targets (if any).
-  - The image target with the `_target` suffix is the image target loaded by the engine. The others are used for various display purposes, but are exported for your convenience.
-  - To enable image targets, call this in `app.js` or `app.ts` file. (Note: `app.js` or `app.ts` may not be created by default; you will need to create this file yourself.) The autoload targets will have a `"loadAutomatically": true` property in their json file.
-```javascript
-const onxrloaded = () => {
-  XR8.XrController.configure({
-    imageTargetData: [
-      require('../image-targets/target1.json'),
-      require('../image-targets/target2.json'),
-    ],
-  })
-}
-window.XR8 ? onxrloaded() : window.addEventListener('xrloaded', onxrloaded)
-```
-- `config/`: Contains the necessary webpack configuration and typescript definitions to support project development.
-- `external/`: Contains dependencies used by your project, loaded in `index.html`.
-  - If you are not using the XR Engine, you can remove the xr.js script tag from `index.html` and delete the `external/xr/` folder to save bandwidth.
-  - You can also customize whether `face`, `slam`, or both, are loaded on the `data-preload-chunks` attribute.
+### terrain-tap-place.ts
+Il componente centrale.  
+È un ECS component per 8th Wall che orchestra tutta l’esperienza.
 
-### Final Notes
-Please reach out to support@8thwall.com with any questions not yet answered in the docs. Thank you for being part of 8th Wall's story!
+Gestisce tre stati:
+
+- loading → attende che il modello 3D sia pronto in memoria  
+- scanning → tenta di posizionare il modello sul piano del suolo rilevato dall’AR  
+- placed → modello posizionato; attiva gesture, billboard e UI
+
+Questo componente crea e coordina tutte le altre classi.  
+Qui risiede la logica per:
+
+- posizionare il terreno
+- resettare la scena
+- aprire/chiudere il viewer 360
+- mostrare suggerimenti all’utente
+
+---
+
+### gesture-handler.ts
+Gestisce le gesture touch sul terreno in AR:
+
+- pinch → scalare  
+- drag → muovere (pan)
+
+Utilizza la camera del dispositivo per convertire i movimenti dello schermo in traslazioni corrette nello spazio AR relative all’orientamento del dispositivo.
+
+Il bug storico più importante di questo file era che `_getCamera()` restituiva una camera statica invece della camera live del renderer.
+
+---
+
+### billboard-manager.ts
+Gestisce gli sprite 3D (pin/icone) che fluttuano sopra il modello.
+
+Legge il modello del terreno da Blender cercando nodi con prefissi:
+
+- hotspot_
+- mountain_
+- pin_
+
+Per ogni nodo:
+
+1. Carica il PNG corrispondente
+2. Lo converte in un THREE.Sprite
+3. Lo posiziona nello spazio AR
+
+Rileva anche i tap sugli sprite tramite un sistema di hitbox NDC personalizzato, perché il raycast standard di Three.js non funziona bene con gli sprite.
+
+Il pivot si trova alla punta del pin (center = 0.5, 0).  
+Questo ha richiesto un fix in questa sessione affinché l’hitbox copra l’intero sprite visivo, non solo la punta.
+
+---
+
+### ar-ui-overlay.ts
+Contiene tutto l’HTML/CSS della UI in AR.
+
+Include:
+
+- pulsante fullscreen (solo entrata, mai uscita)
+- pulsante X per chiudere la scheda
+- barra di altezza
+- barra di rotazione
+- suggerimento gesture  
+  "pinch to scale / drag to move"
+- suggerimento hotspot  
+  "tap a pin to explore 360°"
+- loader di scansione
+
+I timing dei suggerimenti sono coordinati per evitare sovrapposizioni.
+
+---
+
+### viewer-360.ts
+Il visore panoramico.
+
+Crea un overlay fullscreen con una THREE.SphereGeometry invertita, carica texture JPG equirettangolari e permette di navigare tra immagini dello stesso hotspot.
+
+Caratteristiche:
+
+- navigazione con giroscopio + touch
+- handoff seamless tramite quaternion di correzione
+- sistema di cache sliding-window
+  - ±1 immagine
+  - massimo 3 texture in GPU
+
+Tutte le risorse vengono liberate completamente alla chiusura del viewer.
+
+---
+
+### device-check.ts
+Rileva:
+
+- supporto AR
+- accesso alla camera
+- se l’app gira dentro un iframe
+
+Mostra schede di errore bilingue EN/IT con istruzioni specifiche a seconda del caso:
+
+- permesso camera negato
+- camera già usata da un’altra app
+- dispositivo non supportato
+- iframe senza permessi necessari
+
+---
+
+### manifest.json
+Il database degli hotspot 360.
+
+Per ogni hotspot definisce:
+
+- folder → cartella degli asset
+- images → lista dei file JPG (senza estensione)
+- labels → nomi di visualizzazione mostrati all’utente nel viewer
+
+---
+
+### experience-registry.ts
+Registro centrale degli hotspot attivi.
+
+Permette la navigazione tra hotspot  
+(non tra immagini dello stesso hotspot — quello è gestito dal viewer).
+
+Attualmente registrato ma non ancora completamente integrato nella navigazione tra hotspot.
