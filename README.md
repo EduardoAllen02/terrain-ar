@@ -263,4 +263,4 @@ After any change to content files (`manifest.json`, PNGs, images) or source file
 
 ---
 
-*Dolomiti Friulane UNESCO AR Experience · 2026*
+*Dolomiti Friulane AR Experience · 2026*
