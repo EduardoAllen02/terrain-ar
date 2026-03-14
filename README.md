@@ -41,7 +41,6 @@ Devices that do not support WebAR are redirected to a 3D web viewer fallback URL
 | 3D Engine | Three.js (provided by 8th Wall) |
 | 360° Rendering | Custom Three.js sphere renderer with DeviceOrientation gyro |
 | Build Tool | Vite |
-| Hosting | GitHub Pages (`lardoallen02.github.io`) |
 
 ---
 
