@@ -50,14 +50,13 @@ Devices that do not support WebAR are redirected to a 3D web viewer fallback URL
 project/
 │
 ├── src/
-│   ├── terrain-tap-place.ts   # Main ECS component — orchestrates the full experience
-│   ├── billboard-manager.ts   # 3D hotspot/pin sprites with NDC hit detection
-│   ├── viewer-360.ts          # 360° panoramic viewer (gyro-driven, multi-image)
-│   ├── ar-ui-overlay.ts       # All AR UI elements (buttons, bars, hints)
-│   └── device-check.ts        # AR support detection and bilingual error handling
-│
-├── public/
-│   └── assets/
+    └──terrain-ar
+│   |   ├── terrain-tap-place.ts   # Main ECS component — orchestrates the full experience
+│   |   ├── billboard-manager.ts   # 3D hotspot/pin sprites with NDC hit detection
+│   |   ├── viewer-360.ts          # 360° panoramic viewer (gyro-driven, multi-image)
+│   |   ├── ar-ui-overlay.ts       # All AR UI elements (buttons, bars, hints)
+│   |   └── device-check.ts        # AR support detection and bilingual error handling
+│   └──assets/
 │       ├── 360/
 │       │   ├── manifest.json  # Hotspot → image mapping and display labels
 │       │   └── <HOTSPOT>/     # One folder per hotspot, containing *.jpg panoramas
