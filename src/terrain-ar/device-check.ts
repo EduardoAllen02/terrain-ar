@@ -1,5 +1,13 @@
 /**
  * DeviceCheck
+ *
+ * Changes vs previous:
+ *  - checkArSupport(): fixed isIOS detection. iPadOS 13+ dropped "iPad" from
+ *    the User-Agent string and now reports "Macintosh" (same as macOS desktop).
+ *    The old regex /iP(hone|ad|od)/ misses every modern iPad, causing the
+ *    "Device not AR compatible" alert to block the client's iPad entirely.
+ *    Fix: also check for Macintosh UA + maxTouchPoints > 1.
+ *
  * Camera denied bug note:
  *   The AR experience is opened via a link/button from an external site
  *   (new tab or redirect). Some browsers ask for camera permission again
@@ -145,7 +153,14 @@ export function dismissAlert(): void {
  */
 export function checkArSupport(): void {
   const ua        = navigator.userAgent
-  const isIOS     = /iP(hone|ad|od)/.test(ua)
+
+  // iPadOS 13+ dropped "iPad" from the UA and reports "Macintosh" (same as
+  // macOS desktop). We distinguish it from a real Mac by checking for touch
+  // support: a MacBook never has maxTouchPoints > 1, an iPad always does.
+  const isIOS =
+    /iP(hone|ad|od)/.test(ua) ||
+    (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+
   const isAndroid = /Android/.test(ua)
 
   const isSupported = (isIOS || isAndroid) && (

@@ -86,6 +86,7 @@ ecs.registerComponent({
       verticalOffset: 0.0,
       debug:          false,
       scaleOverrides: HOTSPOT_SCALE_OVERRIDES,
+      getCamera: () => (world.three as any).camera,
       onHotspotTap: (name) => {
         // Cancel pending hint + dismiss if already visible
         clearTimeout(hotspotHintTimer)

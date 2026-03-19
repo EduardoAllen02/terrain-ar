@@ -1,5 +1,18 @@
 /**
- * Viewer360 — v2
+ * Viewer360 — v2  (iOS-fixed)
+ *
+ * Changes vs previous:
+ *  - open(): gyro permission & manifest load in parallel via Promise.all so
+ *    DeviceOrientationEvent.requestPermission() fires within the user-gesture
+ *    call stack on iOS (calling it after any prior `await` expires the gesture
+ *    context → silent SecurityError → no gyro).
+ *  - _initRenderer(): powerPreference:'low-power', pixel ratio capped at 1.0
+ *    on iOS, fewer sphere segments to reduce GPU memory pressure.
+ *  - _fetchTexture(): on iOS uses a canvas-based loader (_fetchTextureIOS) that
+ *    downsamples to ≤4096×2048 before uploading to GPU, preventing the
+ *    AR-terrain + panorama combined memory spike that crashes iOS Safari.
+ *  - WebGL context-loss handler added so the page degrades gracefully instead
+ *    of hanging with a black screen.
  *
  * Multi-image per hotspot with a sliding-window texture cache.
  *
@@ -18,23 +31,6 @@
  *     },
  *     ...
  *   }
- *
- *   Keys    = hotspot names as in Blender (after hotspot_ prefix), e.g. "ANDREIS"
- *   folder  = exact folder name inside assets/360/ on the server
- *   images  = filename stems (no path, no .jpg extension)
- *   labels  = display names shown in the bottom title pill (one per image)
- *             Falls back to the image stem if omitted.
- *
- * ── Cache policy ─────────────────────────────────────────────────────────────
- *
- *   • Nothing is downloaded until the user taps a hotspot.
- *   • On open   : load images[0], then silently prefetch images[1].
- *   • On navigate: load images[newIdx] (may already be cached),
- *                  prefetch images[newIdx ± 1] in background,
- *                  dispose textures outside window [newIdx-1 … newIdx+1]
- *                  after a short delay (600 ms) so the GPU has finished.
- *   • The manifest is kept in memory for the Viewer360 instance lifetime.
- *   • All textures are disposed when the viewer closes.
  */
 
 import {probeGyroscope} from './device-check'
@@ -45,13 +41,26 @@ const BASE_PATH    = 'assets/360/'
 const IMAGE_EXT    = '.jpg'
 const MANIFEST_URL = `${BASE_PATH}manifest.json`
 
+// Maximum texture dimensions uploaded to GPU on iOS.
+// A 4096×2048 RGBA texture = ~32 MB GPU memory — safe alongside the AR terrain.
+const IOS_MAX_TEX_W = 4096
+const IOS_MAX_TEX_H = 2048
+
 interface HotspotEntry {
   folder: string
   images: string[]
-  /** Display names matching each image by index. Falls back to image stem. */
   labels?: string[]
 }
 type Manifest = Record<string, HotspotEntry>
+
+// ── iOS detection (shared internally) ────────────────────────────────────────
+
+function isIOSDevice(): boolean {
+  return (
+    /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
+  )
+}
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -256,7 +265,19 @@ export class Viewer360 {
   async open(hotspotName: string, onClose: () => void): Promise<void> {
     injectStyles()
 
-    const manifest = await this._loadManifest()
+    // ── iOS CRITICAL: DeviceOrientationEvent.requestPermission() MUST be
+    // called before any prior `await` in this function. Any `await` that
+    // completes before the call expires the browser's user-gesture context
+    // and iOS throws a silent SecurityError, leaving the viewer without gyro.
+    //
+    // Solution: start both the manifest fetch AND the gyro permission request
+    // simultaneously via Promise.all — both calls begin in the same synchronous
+    // call-stack tick as the user tap that opened this viewer.
+    const [manifest, gyroOk] = await Promise.all([
+      this._loadManifest(),
+      this._requestGyroPermission(),
+    ])
+
     this.currentHotspot = hotspotName
     const entry = manifest?.[hotspotName]
     this.currentFolder  = entry?.folder  ?? hotspotName
@@ -267,8 +288,6 @@ export class Viewer360 {
       onClose()
       return
     }
-
-    const gyroOk = await this._requestGyroPermission()
 
     this._buildOverlay(hotspotName, gyroOk, onClose)
     this._initRenderer()
@@ -309,10 +328,6 @@ export class Viewer360 {
 
   // ── Label helpers ─────────────────────────────────────────────────────────
 
-  /**
-   * Returns the display label for the current image.
-   * Priority: manifest labels[idx] → image stem → hotspot name.
-   */
   private _getCurrentLabel(): string {
     const entry  = this.manifest?.[this.currentHotspot]
     const labels = entry?.labels
@@ -332,17 +347,68 @@ export class Viewer360 {
     return `${folder}/${filename}`
   }
 
+  /**
+   * iOS-safe texture loader.
+   * Draws the image through a 2D canvas capped at IOS_MAX_TEX_W × IOS_MAX_TEX_H
+   * before uploading to GPU. This keeps the combined AR terrain + panorama
+   * memory footprint within iOS Safari's per-tab GPU budget.
+   */
+  private _fetchTextureIOS(url: string): Promise<any> {
+    return new Promise(resolve => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        let w = img.naturalWidth
+        let h = img.naturalHeight
+        if (w > IOS_MAX_TEX_W || h > IOS_MAX_TEX_H) {
+          const ratio = Math.min(IOS_MAX_TEX_W / w, IOS_MAX_TEX_H / h)
+          w = Math.floor(w * ratio)
+          h = Math.floor(h * ratio)
+        }
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width  = w
+          canvas.height = h
+          const ctx = canvas.getContext('2d')
+          if (!ctx || !this.THREE) { resolve(null); return }
+          ctx.drawImage(img, 0, 0, w, h)
+          const tex = new this.THREE.CanvasTexture(canvas)
+          tex.colorSpace = this.THREE.SRGBColorSpace ?? this.THREE.sRGBEncoding
+          resolve(tex)
+        } catch {
+          resolve(null)
+        }
+      }
+      img.onerror = () => resolve(null)
+      img.src = url
+    })
+  }
+
   private _fetchTexture(folder: string, filename: string): Promise<any> {
     const key = this._key(folder, filename)
 
     if (this.texCache.has(key))   return Promise.resolve(this.texCache.get(key))
     if (this.texPending.has(key)) return this.texPending.get(key)!
 
+    const url = `${BASE_PATH}${folder}/${filename}${IMAGE_EXT}`
+
+    // On iOS, use the canvas-based loader that caps dimensions before GPU upload.
+    if (isIOSDevice()) {
+      const promise = this._fetchTextureIOS(url).then(tex => {
+        this.texCache.set(key, tex)
+        this.texPending.delete(key)
+        return tex
+      })
+      this.texPending.set(key, promise)
+      return promise
+    }
+
+    // Non-iOS: standard THREE.TextureLoader path.
     const promise = new Promise<any>(resolve => {
       if (!this.texLoader) { resolve(null); return }
 
       this.texLoader.load(
-        `${BASE_PATH}${folder}/${filename}${IMAGE_EXT}`,
+        url,
         (tex: any) => {
           if (!this.texLoader) { tex.dispose(); resolve(null); return }
           tex.colorSpace = this.THREE.SRGBColorSpace ?? this.THREE.sRGBEncoding
@@ -472,7 +538,6 @@ export class Viewer360 {
     document.body.appendChild(div)
     this.overlay = div
 
-    // X closes the 360 viewer and returns to AR
     div.querySelector('#v360-close-360')!.addEventListener('click', () => this._close(onClose))
 
     if (count > 1) {
@@ -536,14 +601,32 @@ export class Viewer360 {
     const { THREE } = this
     const canvas = document.getElementById('v360-canvas') as HTMLCanvasElement
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
+    // powerPreference: 'low-power' lets iOS choose a less memory-hungry GPU
+    // path, reducing the chance of a combined AR + 360 memory crash.
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: false,
+        powerPreference: 'low-power',
+      })
+    } catch (e) {
+      console.warn('[Viewer360] WebGLRenderer creation failed:', e)
+      // Renderer is null — _startLoop() checks for this and bails out.
+      return
+    }
+
+    // iOS: pixel ratio 1.0 — halves framebuffer memory vs the default 2.0 on
+    // Retina displays, leaving more headroom for the panorama texture.
+    const ios = isIOSDevice()
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, ios ? 1.0 : 1.5))
     this.renderer.setSize(window.innerWidth, window.innerHeight)
 
     this.scene  = new THREE.Scene()
     this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000)
 
-    const geo = new THREE.SphereGeometry(500, 60, 40)
+    // Fewer segments on iOS to reduce GPU geometry memory.
+    const [wSegs, hSegs] = ios ? [48, 32] : [60, 40]
+    const geo = new THREE.SphereGeometry(500, wSegs, hSegs)
     geo.scale(-1, 1, 1)
     this.sphere = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x1a2a3a }))
     this.scene.add(this.sphere)
@@ -553,6 +636,23 @@ export class Viewer360 {
     this._q1       = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5))
     this._qOrient  = new THREE.Quaternion()
     this._zee      = new THREE.Vector3(0, 0, 1)
+
+    // WebGL context-loss handler — prevents an invisible hang on iOS when the
+    // browser reclaims GPU memory and invalidates our context.
+    canvas.addEventListener('webglcontextlost', (e: Event) => {
+      e.preventDefault()
+      console.warn('[Viewer360] WebGL context lost — cancelling render loop')
+      cancelAnimationFrame(this.rafId)
+    }, false)
+
+    canvas.addEventListener('webglcontextrestored', () => {
+      console.warn('[Viewer360] WebGL context restored')
+      // Re-apply current texture and restart the loop.
+      const key = this._key(this.currentFolder, this.currentImages[this.currentIdx] ?? '')
+      const tex = this.texCache.get(key) ?? null
+      this._applySphereTexture(tex)
+      this._startLoop()
+    }, false)
   }
 
   private _fullDispose(): void {
@@ -596,9 +696,16 @@ export class Viewer360 {
     const DOE = (DeviceOrientationEvent as any)
     if (typeof DOE?.requestPermission === 'function') {
       try {
+        // This call is safe because _requestGyroPermission() is now always
+        // started before any prior `await` in open() (via Promise.all).
+        // iOS sees it as within the user-gesture call stack.
         const result = await DOE.requestPermission()
         if (result !== 'granted') return false
-      } catch { return false }
+      } catch {
+        // SecurityError if called outside gesture context, or if the user
+        // dismissed the prompt. Fall through to touch-drag mode.
+        return false
+      }
     }
     return probeGyroscope(1200)
   }

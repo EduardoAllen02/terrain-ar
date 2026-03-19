@@ -4,6 +4,16 @@ export interface BillboardOptions {
   debug?:          boolean
   onHotspotTap?:   (name: string) => void
   scaleOverrides?: Record<string, number>
+  /**
+   * Returns the live AR camera used for NDC hit-projection.
+   *
+   * MUST be provided as `() => world.three.camera` from the ECS component.
+   * Without this, BillboardManager falls back to scene.traverse() which finds
+   * the 8th Wall static camera placeholder — causing incorrect NDC projection
+   * and missed/wrong hotspot taps, especially on iOS where device orientation
+   * is reflected in the camera matrix.
+   */
+  getCamera?:      () => any
 }
 
 const ASSET_PATHS = {
@@ -50,6 +60,7 @@ export class BillboardManager {
       debug:          opts.debug          ?? false,
       onHotspotTap:   opts.onHotspotTap   ?? (() => {}),
       scaleOverrides: opts.scaleOverrides  ?? {},
+      getCamera:      opts.getCamera       ?? (() => null),
     }
   }
 
@@ -199,9 +210,23 @@ export class BillboardManager {
     if (closest) this.opts.onHotspotTap(closest.name)
   }
 
+  /**
+   * Returns the live AR camera for NDC projection.
+   *
+   * Priority:
+   *  1. opts.getCamera() — should be () => world.three.camera, provided by
+   *     the ECS component. This is the camera with real device orientation.
+   *  2. scene.traverse() fallback — finds the static 8th Wall placeholder.
+   *     Used only if getCamera was not provided or returns null/undefined.
+   *     Kept as fallback so the manager still works in non-8th-Wall contexts.
+   */
   private _getCamera(): any {
+    const fromOpt = this.opts.getCamera?.()
+    if (fromOpt) return fromOpt
+
+    // Fallback: traverse the scene (static placeholder on 8th Wall — works
+    // for hit detection only when device orientation hasn't changed the matrix)
     let cam: any = null
-    // Sprites are direct children of the scene — traverse from scene root.
     this.billboards[0]?.sprite.parent?.traverse?.((c: any) => {
       if (c.isCamera && !cam) cam = c
     })
