@@ -63,7 +63,6 @@ function isIOSDevice(): boolean {
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-
 const injectStyles = (() => {
   let done = false
   return (): void => {
