@@ -206,8 +206,18 @@ const injectStyles = (() => {
 
 // ── Orientation helper ────────────────────────────────────────────────────────
 
+
+
 function getOrientAngleDeg(): number {
-  return window.screen?.orientation?.angle ?? (window as any).orientation ?? 0
+  const raw = window.screen?.orientation?.angle ?? (window as any).orientation ?? 0
+  const isIPad =
+    /iPad/.test(navigator.userAgent) ||
+    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
+  // iPad axes are transposed vs iPhone (landscape-natural vs portrait-natural),
+  // so the correction mirrors: iPhone uses `raw`, iPad uses `90 - raw`.
+  // Portrait (raw=90): 90-90=0 → no correction needed  ✓
+  // Landscape (raw=0): 90-0=90 → applies -90° via qOrient  ✓
+  return isIPad ? 90 - raw : raw
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
