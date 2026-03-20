@@ -207,11 +207,7 @@ const injectStyles = (() => {
 // ── Orientation helper ────────────────────────────────────────────────────────
 
 function getOrientAngleDeg(): number {
-  const raw = window.screen?.orientation?.angle ?? (window as any).orientation ?? 0
-  const isIPad =
-    /iPad/.test(navigator.userAgent) ||
-    (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
-  return isIPad ? raw - 90 : raw
+  return window.screen?.orientation?.angle ?? (window as any).orientation ?? 0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
