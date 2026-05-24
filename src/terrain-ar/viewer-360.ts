@@ -514,7 +514,7 @@ export class Viewer360 {
                stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Previous
+          Back
         </button>
         <button class="v360-nav-btn" id="v360-next-btn">
           Next

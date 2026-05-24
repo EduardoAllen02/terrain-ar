@@ -2,6 +2,8 @@
 
 > A WebAR experience built on 8th Wall that places an interactive 3D terrain model of the Dolomiti Friulane UNESCO site into the real world, with tappable hotspots that open immersive 360° panoramic viewers.
 
+![Preview](docs/preview.png)
+
 ---
 
 ## Table of Contents
